@@ -1,20 +1,22 @@
-# google-cybersecurity-certificate
-A full set of study notes from the Google Cybersecurity Professional Certificate on Coursera. Covers foundational security concepts, network defense, threat detection, SIEM, incident response, digital forensics, and more.
-
 # Google Cybersecurity Professional Certificate
-
-This repository contains my complete study notes from the **Google Cybersecurity Professional Certificate** on Coursera. It documents everything I've learned while training to become a cybersecurity professional — from foundational principles to hands-on defensive security techniques.
+A full set of study notes from the Google Cybersecurity Professional Certificate on Coursera. Covers foundational security concepts, network defense, threat detection, SIEM, incident response, digital forensics, and more.
 
 ---
 
 # Courses Covered
 
-| 01 | Foundations of Cybersecurity ✅ |
+| 01 | Foundations of Cybersecurity  |
+
 | 02 | Network Security |
+
 | 03 | Security Tools and Cyber Threats |
+
 | 04 | Assets, Threats, and Vulnerabilities |
+
 | 05 | Incident Detection and Response |
+
 | 06 | Forensics and Threat Hunting |
+
 | 07 | Final Capstone Project |
 
 ---
