@@ -1,0 +1,228 @@
+## Course 2: Play It Safe – Manage Security Risks
+
+This course explores how cybersecurity professionals manage security risks, apply frameworks, and use tools to detect, respond to, and recover from incidents.
+
+---
+
+## Module 1: Security and Risk Management
+
+### 1. Security and Risk Management
+
+Focus: Establish a security strategy and align it with business operations.
+
+- Define goals to protect critical assets like PII.
+- Use risk mitigation to reduce the impact of threats.
+- Align with compliance requirements to shape policies.
+- Develop business continuity and disaster recovery plans.
+- Follow legal and ethical practices to prevent negligence and abuse.
+
+### 2. Asset Security
+
+Focus: Manage and protect physical and digital assets.
+
+- Secure data during storage, transfer, retention, and destruction.
+- Apply policies for data classification and access control.
+- Identify and monitor who has access to sensitive data.
+
+### 3. Security Architecture and Engineering
+
+Focus: Build systems with layered security controls.
+
+- Apply secure architecture principles during system design.
+- Promote shared responsibility for security across the organization.
+- Encourage reporting and awareness of potential threats.
+
+### 4. Communication and Network Security
+
+Focus: Protect data during transmission and network communication.
+
+- Secure data in transit over internal, cloud, and remote networks.
+- Restrict risky behavior over public networks (e.g., Wi-Fi, Bluetooth).
+- Use network access controls to limit exposure.
+
+### 5. Identity and Access Management (IAM)
+
+Focus: Manage access to resources.
+
+- Grant only necessary access using the principles of least privilege.
+- IAM components:
+  - Identification: Who you are.
+  - Authentication: Verifying your identity.
+  - Authorization: What you're allowed to access.
+  - Accountability: Logging user actions.
+
+### 6. Security Assessment and Testing
+
+Focus: Evaluate existing controls and identify improvements.
+
+- Perform audits and assessments to detect weaknesses.
+- Analyze data for threats and vulnerabilities.
+- Improve controls (e.g., enforce MFA).
+
+### 7. Security Operations
+
+Focus: Respond to incidents and manage active threats.
+
+- Apply incident response processes to contain attacks.
+- Use digital forensics to investigate incidents.
+- Implement lessons learned to prevent recurrence.
+
+### 8. Software Development Security
+
+Focus: Secure software throughout its lifecycle.
+
+- Use secure coding practices from design to deployment.
+- Conduct secure design and code reviews.
+- Perform application-level testing to identify vulnerabilities.
+
+---
+
+## Threats, Risks, and Vulnerabilities
+
+### Threat
+
+Definition: A circumstance or event with the potential to negatively impact an asset.
+
+Example: Phishing, ransomware, social engineering.
+
+### Risk
+
+Definition: The likelihood that a threat exploits a vulnerability and affects confidentiality, integrity, or availability.
+
+- Low-risk: Public web content.
+- Medium-risk: Internal documents.
+- High-risk: PII, SPII, intellectual property.
+
+### Vulnerability
+
+Definition: A weakness that can be exploited by a threat.
+
+Examples: Outdated firewalls, weak passwords, unpatched software, human error.
+
+---
+
+## Risk Management
+
+### Key Strategies
+
+- Acceptance: Acknowledge the risk but take no action.
+- Avoidance: Eliminate the risk entirely.
+- Transference: Shift the risk to a third party (e.g., cyber insurance).
+- Mitigation: Reduce the likelihood or impact.
+
+### Risk Management Frameworks
+
+**NIST RMF** – 7 steps:
+
+1. Prepare
+2. Categorize
+3. Select
+4. Implement
+5. Assess
+6. Authorize
+7. Monitor
+
+**HITRUST** – Common in healthcare for managing compliance and risk.
+
+---
+
+## Cybersecurity Frameworks and Controls
+
+### What Are Frameworks?
+
+- Structured guidelines for managing risk, threats, and compliance.
+- Help build, monitor, and improve security programs.
+
+Notable examples:
+- NIST CSF and RMF
+- Cyber Threat Framework (CTF)
+- ISO/IEC 27001
+- HIPAA, GDPR, PCI-DSS
+
+### What Are Controls?
+
+- Safeguards that reduce risk.
+- Types:
+  - Physical (locks, security guards)
+  - Technical (MFA, firewalls, antivirus)
+  - Administrative (policies, role-based access)
+
+---
+
+## NIST Cybersecurity Framework – 5 Core Functions
+
+1. Identify: Understand assets and risk.
+2. Protect: Implement preventive controls.
+3. Detect: Recognize security incidents.
+4. Respond: Contain and resolve incidents.
+5. Recover: Restore systems and operations.
+
+---
+
+## OWASP Security Principles
+
+- Minimize Attack Surface Area
+- Principle of Least Privilege
+- Defense in Depth
+- Separation of Duties
+- Keep Security Simple
+- Fix Issues at the Root
+- Establish Secure Defaults
+- Fail Securely
+- Don’t Trust External Services
+- Avoid Security by Obscurity
+
+---
+
+## Security Audits
+
+- Independent review of security controls and compliance.
+- Assesses effectiveness of practices and reveals risks.
+- Informed by internal policies and external regulations.
+- Common frameworks: NIST CSF, ISO 27001
+
+---
+
+## SIEM and SOAR
+
+### SIEM Tools (Security Information and Event Management)
+
+- Collect and analyze log data.
+- Detect anomalies and alert analysts.
+- Examples: Splunk, IBM QRadar, Chronicle
+
+### SOAR Tools (Security Orchestration, Automation, and Response)
+
+- Automate incident response tasks.
+- Reduce manual effort and response time.
+
+---
+
+## Cybersecurity Playbooks
+
+- Documented procedures for responding to security incidents.
+- Include response steps, communication plans, and containment strategies.
+- Help ensure consistent, lawful, and timely actions.
+
+Common phases:
+1. Preparation
+2. Detection
+3. Analysis
+4. Containment
+5. Eradication
+6. Recovery
+7. Post-Incident Review
+
+---
+
+## Key Terms
+
+- Risk: Potential for loss due to threats and vulnerabilities.
+- Vulnerability: A weakness that could be exploited.
+- Threat: A potential cause of an unwanted incident.
+- Framework: A set of guidelines and best practices.
+- Control: A tool or policy used to reduce risk.
+- IAM: A system for managing digital identities.
+- Playbook: A manual for responding to incidents.
+- SIEM: A platform for detecting and responding to threats using log data.
+- SOAR: A system that automates security response workflows.
