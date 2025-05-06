@@ -1,86 +1,240 @@
-#  Google Cybersecurity Certificate – Course 1: Foundations of Cybersecurity
+# Google Cybersecurity Certificate – Course 1: Foundations of Cybersecurity
 
 ---
 
-##  What is Cybersecurity?
+## Module 1: What is Cybersecurity?
 
-Cybersecurity is the practice of protecting **systems, networks, programs, and data** from:
+### What is Cybersecurity?
 
-- Unauthorized access  
-- Damage or destruction  
-- Disruption of service  
+Cybersecurity is the practice of protecting systems, networks, programs, and data from:
+- Unauthorized access
+- Damage
+- Disruption
 - Criminal exploitation
 
-The foundation of cybersecurity relies on the **CIA Triad**:
+Cybersecurity relies on the **CIA Triad**:
+- **Confidentiality** – Only authorized users can access the data
+- **Integrity** – The data is accurate and unaltered
+- **Availability** – The data is accessible to those who need it, when they need it
 
-- **Confidentiality** – Only authorized users have access  
-- **Integrity** – Data remains accurate and untampered  
-- **Availability** – Information is accessible when needed  
+### Goals of Cybersecurity
 
----
+- Protect people and systems from cyber threats
+- Safeguard sensitive data and business operations
+- Prevent unauthorized access and data breaches
+- Maintain trust with users, customers, and stakeholders
 
-##  Goals of Cybersecurity
+### Types of Threats
 
-- Protect people, devices, and systems from threats  
-- Safeguard sensitive data and digital operations  
-- Prevent unauthorized access or malicious actions  
-- Maintain public trust and business continuity  
+- **External Threats** – Hackers, cybercriminals, advanced persistent threats (APTs)
+- **Internal Threats** – Disgruntled employees, careless users, or contractors
 
----
+### Benefits of Strong Cybersecurity
 
-##  Types of Threats
+- Prevents attacks and data breaches
+- Protects internal and external assets
+- Helps organizations remain compliant with laws and regulations
+- Maintains operational continuity
+- Reduces financial and reputational damage
 
-- **External Threats** – Hackers, cybercriminals, APTs  
-- **Internal Threats** – Employees, contractors, misconfigurations  
+### Cybersecurity Analysts
 
----
+Analysts are responsible for:
+- Monitoring systems and networks
+- Investigating incidents
+- Responding to threats
+- Installing and configuring prevention tools
+- Using tools like SIEM, IDS/IPS, antivirus, and vulnerability scanners
 
-##  Benefits of Strong Cybersecurity
+### Key Skills
 
-- Prevents data breaches and cyberattacks  
-- Protects business assets and infrastructure  
-- Ensures compliance with laws and standards (e.g., GDPR, HIPAA)  
-- Maintains operational productivity  
-- Preserves financial and reputational stability  
+- **Technical Skills** – Knowledge of networks, systems, tools
+- **Soft Skills** – Communication, collaboration, analytical thinking, problem-solving, attention to detail
 
----
+### Organizations That Need Cybersecurity
 
-##  Cybersecurity Analyst Responsibilities
-
-Cybersecurity analysts work in Security Operations Centers (SOCs) and typically:
-
-- Monitor systems and logs  
-- Detect and investigate incidents  
-- Install and manage security tools (SIEM, IDS/IPS, AV)  
-- Respond to and document threats  
-- Use vulnerability scanners and reporting tools  
-
----
-
-##  Core Skills for Cybersecurity Roles
-
-**Technical Skills**
-- Understanding of networks, operating systems, and protocols  
-- Hands-on experience with security tools (firewalls, SIEMs, scanners)
-
-**Soft Skills**
-- Clear communication  
-- Analytical thinking  
-- Team collaboration  
-- Problem-solving  
-- Attention to detail  
+- Government agencies
+- Healthcare providers
+- Financial institutions
+- Retail and e-commerce
+- Any organization that handles sensitive data
 
 ---
 
-##  Industries That Rely on Cybersecurity
+## Module 2: Common Threats and Social Engineering
 
-Cybersecurity is essential in sectors including:
+### Common Types of Malware
 
-- Government  
-- Healthcare  
-- Financial services  
-- Education  
-- Retail and e-commerce  
-- Any organization that stores or transmits sensitive data
+- **Malware** – Malicious software designed to damage or gain unauthorized access
+- **Viruses** – Attach to clean files; require user action to spread
+- **Worms** – Spread automatically across networks without user interaction
+- **Ransomware** – Locks data or systems and demands payment for restoration
+
+### Social Engineering Attacks
+
+- **Phishing** – Fake emails to steal information
+- **Spear Phishing** – Targeted phishing at specific individuals
+- **Whaling** – Spear phishing aimed at executives
+- **Vishing** – Phone calls that attempt to extract information
+- **Smishing** – Text messages that lure users into clicking malicious links
+- **Business Email Compromise (BEC)** – Attacker impersonates trusted individual
+
+### Psychology Behind Attacks
+
+Attackers exploit:
+- Curiosity ("You won a prize!")
+- Fear ("Your account is locked!")
+- Urgency ("Respond immediately")
+- Trust ("I’m from IT")
+
+### Other Threats
+
+- **Insider Threats** – Employees or ex-employees misusing access
+- **External Threats** – Outside attackers
+- **Threat Actor** – Any individual or group carrying out an attack
+
+### SIEM and Threat Detection
+
+- **SIEM** – Collects and analyzes logs from multiple systems
+- Detects abnormal activity, correlates data, and alerts analysts
 
 ---
+
+## Module 3: Frameworks, Controls, and Compliance
+
+### Purpose of Frameworks
+
+Frameworks help organizations:
+- Protect personal and financial information
+- Identify weaknesses
+- Respond to business crises
+- Manage cybersecurity risk
+- Align security with business goals
+
+### Key Terminology
+
+- **CIA Triad** – Confidentiality, Integrity, Availability
+- **Security Frameworks** – Structured plans for managing security
+- **Security Controls** – Specific safeguards against risk
+- **Security Architecture** – Design of systems and defenses
+- **Security Governance** – Policies and decision structures
+- **Compliance** – Adherence to regulations and standards
+- **Security Ethics** – Making responsible decisions with access and information
+
+### Common Frameworks and Regulations
+
+| Framework / Law | Purpose |
+|------------------|---------|
+| NIST CSF | US cybersecurity framework |
+| FERC-NERC | Secures power grid systems |
+| FedRAMP | Secures cloud services for federal use |
+| CIS Controls | General best practices |
+| GDPR | Protects personal data in the EU |
+| PCI DSS | Secures credit card data |
+| HIPAA | Secures healthcare data in the US |
+
+### PII and Data Privacy
+
+- **PII** – Identifying personal data (e.g., name, ID)
+- **SPII** – Sensitive personal data (e.g., biometrics, finances)
+- **PHI** – Protected health information under HIPAA
+- **Privacy Protection** – Ensuring personal data isn’t exposed or misused
+
+### Additional Terms
+
+- **Asset** – Anything of value (data, systems, people)
+- **Hacktivist** – Hacker motivated by political or social causes
+
+---
+
+## Module 4: Tools for Protecting Business Operations
+
+### SIEM (Security Information and Event Management)
+
+| Feature | Function |
+|---------|----------|
+| Log Aggregation | Collects data from systems and apps |
+| Alerting | Warns of suspicious activity |
+| Dashboards | Visualizes event data |
+| Hosting Options | Cloud or on-premise |
+
+Examples: Splunk, IBM QRadar, ArcSight, Graylog
+
+### Network Protocol Analyzers (Packet Sniffers)
+
+Tools for inspecting data traveling over the network.
+
+| Tool | Description |
+|------|-------------|
+| Wireshark | Visual interface for packet-level analysis |
+| tcpdump | Command-line traffic capture tool |
+
+### Security Playbooks
+
+Predefined guides for analysts to follow during incidents.
+
+- **Chain of Custody** – Tracks who accessed evidence and when
+- **Preserving Evidence** – Follows the "Order of Volatility":
+  1. RAM
+  2. Network traffic
+  3. Running processes
+  4. Disk storage
+  5. Backups
+
+### Analyst Tools and Categories
+
+| Category | Tools |
+|----------|-------|
+| SIEM | Splunk, QRadar |
+| Packet Analysis | Wireshark, tcpdump |
+| Endpoint Protection | CrowdStrike, Defender |
+| Asset Management | Lansweeper |
+| Forensics | Autopsy, FTK Imager |
+| Identity Management | Okta, Active Directory |
+| Encryption | VeraCrypt, BitLocker |
+
+### Programming for Analysts
+
+| Language | Use |
+|----------|-----|
+| Python | Automation and scripting |
+| SQL | Querying data from logs/databases |
+
+- **Database** – Organized data collection
+- **Data Point** – One individual record within a database
+
+### Operating Systems and Linux
+
+- **Linux** – Command-line based, open-source operating system
+- Used heavily in security environments for scripting, forensics, and automation
+
+### Web Vulnerabilities
+
+Web apps can have flaws that allow attackers to:
+- Access unauthorized data
+- Inject malicious code
+- Steal sessions or credentials
+
+Resource: OWASP Top 10 vulnerabilities list
+
+---
+
+### Encryption Concepts
+
+- **Plaintext** – Unencrypted, readable data
+- **Ciphertext** – Encrypted, unreadable without a key
+- **Encryption** – Secures data from unauthorized access
+- **Encoding vs. Encryption**:
+  - Encoding = Data formatting (not secure)
+  - Encryption = Data protection (secure)
+
+---
+
+### Summary Takeaways
+
+- Analysts must understand networks, tools, systems, and human behavior
+- SIEM, IDS, antivirus, encryption, and automation are critical tools
+- Knowledge of Linux and programming increases analyst effectiveness
+- Well-handled evidence and playbooks are essential for proper investigations
+- Cybersecurity skills are valuable across every industry
+
