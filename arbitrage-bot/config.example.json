@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy to config.json and set YOUR actual account taker fees. These defaults are public ballpark rates and are almost certainly wrong for your tier. Lower fees = more routes become profitable.",
+  "taker_fees": {
+    "coinbase": 0.0060,
+    "kraken": 0.0026,
+    "bitstamp": 0.0030,
+    "binance": 0.0010
+  }
+}
