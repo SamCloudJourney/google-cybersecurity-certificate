@@ -1,0 +1,134 @@
+name: SDK file-app fresh Git checkout collision
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/sdk-fileapp-fresh-git-checkout-collision.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fresh-checkout:
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk:
+          - '10.0.401'
+          - '11.0.100-rc.1.26425.128'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    name: fresh-git-${{ matrix.sdk }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.sdk }}
+
+      - name: Reproduce from a normal fresh Git checkout
+        shell: bash
+        run: |
+          set -euxo pipefail
+          dotnet --info
+
+          ORIGIN="$RUNNER_TEMP/case-collision-origin"
+          CLONE="$RUNNER_TEMP/case-collision-clone"
+          MARKER="$RUNNER_TEMP/FRESH_GIT_COLLISION.marker"
+          rm -rf "$ORIGIN" "$CLONE"
+          rm -f "$MARKER"
+
+          mkdir -p "$ORIGIN/src/victim" "$ORIGIN/src/VICTIM"
+          cat > "$ORIGIN/src/victim/Program.cs" <<EOF
+          using System.IO;
+          File.WriteAllText(@"$MARKER", "ATTACKER");
+          Console.WriteLine("FRESH_GIT_ATTACKER_EXECUTED");
+          EOF
+
+          cat > "$ORIGIN/src/VICTIM/Program.cs" <<'EOF'
+          Console.WriteLine("FRESH_GIT_TRUSTED_VICTIM_EXECUTED");
+          EOF
+
+          cd "$ORIGIN"
+          git init
+          git config user.email "research@example.invalid"
+          git config user.name "Authorized Research"
+          git add .
+          git commit -m "case-sensitive checkout fixture"
+
+          git clone "$ORIGIN" "$CLONE"
+          cd "$CLONE"
+
+          A="$CLONE/src/victim/Program.cs"
+          V="$CLONE/src/VICTIM/Program.cs"
+          test -f "$A"
+          test -f "$V"
+          test "$A" != "$V"
+
+          echo "=== Fresh checkout mtimes; no manipulation ==="
+          stat "$A" "$V"
+
+          python3 - "$A" "$V" <<'PY'
+          import hashlib,sys
+          for p in sys.argv[1:]:
+              print(p, hashlib.sha256(p.upper().encode()).hexdigest())
+          print("CASE_NORMALIZED_PATHS_EQUAL=", sys.argv[1].upper()==sys.argv[2].upper())
+          PY
+
+          echo "=== Build attacker path only; this must not execute its source ==="
+          dotnet build "$A" > "$RUNNER_TEMP/fresh-build.out" 2> "$RUNNER_TEMP/fresh-build.err"
+          cat "$RUNNER_TEMP/fresh-build.out"
+          cat "$RUNNER_TEMP/fresh-build.err"
+          test ! -f "$MARKER"
+          echo "FRESH_GIT_BUILD_ONLY_PRECONDITION=PASS"
+
+          echo "=== Later run the distinct trusted path ==="
+          dotnet run --file "$V" > "$RUNNER_TEMP/fresh-victim.out" 2> "$RUNNER_TEMP/fresh-victim.err"
+          cat "$RUNNER_TEMP/fresh-victim.out"
+          cat "$RUNNER_TEMP/fresh-victim.err"
+
+          if grep -q 'FRESH_GIT_ATTACKER_EXECUTED' "$RUNNER_TEMP/fresh-victim.out" && test -f "$MARKER"; then
+            echo "FRESH_GIT_RESULT=ATTACKER_EXECUTED_DURING_TRUSTED_RUN"
+          else
+            echo "FRESH_GIT_RESULT=NOT_REPRODUCED"
+            exit 1
+          fi
+
+          echo "=== Cache-removal causal control ==="
+          HASH=$(python3 - "$V" <<'PY'
+          import hashlib,sys
+          print(hashlib.sha256(sys.argv[1].upper().encode()).hexdigest())
+          PY
+          )
+          rm -f "$MARKER"
+          rm -rf "$HOME/.local/share/dotnet/runfile/Program-$HASH"
+
+          dotnet run --file "$V" > "$RUNNER_TEMP/fresh-clean.out" 2> "$RUNNER_TEMP/fresh-clean.err"
+          cat "$RUNNER_TEMP/fresh-clean.out"
+          cat "$RUNNER_TEMP/fresh-clean.err"
+
+          if grep -q 'FRESH_GIT_TRUSTED_VICTIM_EXECUTED' "$RUNNER_TEMP/fresh-clean.out" && ! test -f "$MARKER"; then
+            echo "FRESH_GIT_CACHE_REMOVAL_CONTROL=TRUSTED_VICTIM_EXECUTED"
+          else
+            echo "FRESH_GIT_CACHE_REMOVAL_CONTROL=FAILED"
+            exit 1
+          fi
+
+          cp "$RUNNER_TEMP/fresh-build.out" "$GITHUB_WORKSPACE/fresh-build-${{ matrix.sdk }}.out"
+          cp "$RUNNER_TEMP/fresh-build.err" "$GITHUB_WORKSPACE/fresh-build-${{ matrix.sdk }}.err"
+          cp "$RUNNER_TEMP/fresh-victim.out" "$GITHUB_WORKSPACE/fresh-victim-${{ matrix.sdk }}.out"
+          cp "$RUNNER_TEMP/fresh-victim.err" "$GITHUB_WORKSPACE/fresh-victim-${{ matrix.sdk }}.err"
+          cp "$RUNNER_TEMP/fresh-clean.out" "$GITHUB_WORKSPACE/fresh-clean-${{ matrix.sdk }}.out"
+          cp "$RUNNER_TEMP/fresh-clean.err" "$GITHUB_WORKSPACE/fresh-clean-${{ matrix.sdk }}.err"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fresh-git-case-collision-${{ matrix.sdk }}
+          path: |
+            fresh-*.out
+            fresh-*.err
