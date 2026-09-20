@@ -357,3 +357,37 @@ jobs:
             /tmp/kestrel-proxy-lab/origin.log
             /tmp/nginx-access.log
             /tmp/nginx-error.log
+
+
+  aspnetcore-main-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    name: aspnetcore-main-regression
+    steps:
+      - name: Clone ASP.NET Core main with submodules
+        shell: bash
+        run: |
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/dotnet/aspnetcore.git /tmp/aspnetcore
+
+      - name: Restore repository toolchain
+        shell: bash
+        run: |
+          cd /tmp/aspnetcore
+          ./restore.sh
+
+      - name: Run current-main Kestrel chunk-extension regression tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd /tmp/aspnetcore
+          source ./activate.sh
+          dotnet test src/Servers/Kestrel/test/InMemory.FunctionalTests/InMemory.FunctionalTests.csproj \
+            --filter "FullyQualifiedName~ChunkedRequestTests.RejectsInvalidChunkExtensions|FullyQualifiedName~ChunkedRequestTests.AllowsValidChunkExtensions" \
+            --logger "console;verbosity=normal" | tee /tmp/aspnetcore-main-kestrel-tests.log
+
+      - name: Upload current-main regression log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aspnetcore-main-kestrel-regression
+          path: /tmp/aspnetcore-main-kestrel-tests.log
