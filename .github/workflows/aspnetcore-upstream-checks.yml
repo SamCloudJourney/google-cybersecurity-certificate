@@ -1,0 +1,103 @@
+name: ASP.NET Core upstream regression checks
+
+on:
+  push:
+    branches:
+      - lab/aspnetcore-upstream-checks-20260920
+    paths:
+      - .github/workflows/aspnetcore-upstream-checks.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aspnetcore-upstream-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regressions:
+    name: Pinned upstream Kestrel and DataProtection tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: 1
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: 1
+    steps:
+      - name: Check out the reviewed upstream revision
+        uses: actions/checkout@v4
+        with:
+          repository: dotnet/aspnetcore
+          ref: 1fcd7ef305697a1888f3ede076010350ae9f4f8d
+          path: aspnetcore
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Restore upstream toolchain
+        id: bootstrap
+        working-directory: aspnetcore
+        shell: bash
+        run: |
+          set -eo pipefail
+          mkdir -p "$RUNNER_TEMP/upstream-evidence"
+          git rev-parse HEAD | tee "$RUNNER_TEMP/upstream-evidence/upstream-commit.txt"
+          ./restore.sh 2>&1 | tee "$RUNNER_TEMP/upstream-evidence/restore.log"
+          ./.dotnet/dotnet --info > "$RUNNER_TEMP/upstream-evidence/dotnet-info.txt"
+
+      - name: Run existing Kestrel acceptance and rejection regressions
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        working-directory: aspnetcore
+        shell: bash
+        run: |
+          set -eo pipefail
+          export DOTNET_ROOT="$PWD/.dotnet"
+          export PATH="$DOTNET_ROOT:$PATH"
+          dotnet test src/Servers/Kestrel/test/InMemory.FunctionalTests/InMemory.FunctionalTests.csproj --filter 'FullyQualifiedName~ChunkedRequestTests.RejectsInvalidChunkExtensions|FullyQualifiedName~ChunkedRequestTests.AllowsValidChunkExtensions' --logger 'trx;LogFileName=kestrel.trx' --logger 'console;verbosity=normal' --results-directory "$RUNNER_TEMP/upstream-evidence/kestrel" 2>&1 | tee "$RUNNER_TEMP/upstream-evidence/kestrel.log"
+
+      - name: Run existing DataProtection integrity and isolation regressions
+        if: ${{ always() && steps.bootstrap.outcome == 'success' }}
+        working-directory: aspnetcore
+        shell: bash
+        run: |
+          set -eo pipefail
+          export DOTNET_ROOT="$PWD/.dotnet"
+          export PATH="$DOTNET_ROOT:$PATH"
+          dotnet test src/DataProtection/DataProtection/test/Microsoft.AspNetCore.DataProtection.Tests/Microsoft.AspNetCore.DataProtection.Tests.csproj --framework net11.0 --filter 'FullyQualifiedName~ManagedAuthenticatedEncryptorTests|FullyQualifiedName~KeyRingBasedDataProtectorTests' --logger 'trx;LogFileName=dataprotection.trx' --logger 'console;verbosity=normal' --results-directory "$RUNNER_TEMP/upstream-evidence/dataprotection" 2>&1 | tee "$RUNNER_TEMP/upstream-evidence/dataprotection.log"
+
+      - name: Verify that tests actually executed
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, sys, xml.etree.ElementTree as ET
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'upstream-evidence'
+          root.mkdir(parents=True, exist_ok=True)
+          ns = {'t': 'http://microsoft.com/schemas/VisualStudio/TeamTest/2010'}
+          summary = {}
+          for suite in ('kestrel', 'dataprotection'):
+              path = root / suite / (suite + '.trx')
+              if not path.is_file():
+                  summary[suite] = {'executed': False, 'reason': 'No TRX result produced'}
+                  continue
+              counters = ET.parse(path).find('.//t:ResultSummary/t:Counters', ns)
+              if counters is None:
+                  summary[suite] = {'executed': False, 'reason': 'No test counters found'}
+                  continue
+              summary[suite] = dict(counters.attrib)
+              summary[suite]['executed'] = int(counters.get('executed', '0')) > 0
+          text = json.dumps(summary, indent=2, sort_keys=True)
+          print(text)
+          (root / 'summary.json').write_text(text + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('## Pinned upstream regression results\n\n```json\n' + text + '\n```\n')
+          ok = all(item.get('executed') is True and int(item.get('passed', '0')) > 0 and int(item.get('failed', '0')) == 0 for item in summary.values())
+          sys.exit(0 if ok else 1)
+          PY
+
+      - name: Preserve build and test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aspnetcore-upstream-evidence-${{ github.run_id }}
+          path: ${{ runner.temp }}/upstream-evidence/
+          if-no-files-found: error
+          retention-days: 14
