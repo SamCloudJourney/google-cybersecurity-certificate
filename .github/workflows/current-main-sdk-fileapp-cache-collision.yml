@@ -183,12 +183,25 @@ jobs:
           cd "$SDK_ROOT"
           ./build.sh -projects "$SDK_ROOT/test/dotnet-aot.Tests/dotnet-aot.Tests.csproj" -c Debug 2>&1 | tee "$GITHUB_WORKSPACE/current-main-build.log"
 
-      - name: Run focused current-main regression
+      - name: Run current-main MTP host and require security marker
         shell: bash
         run: |
           set -euxo pipefail
           cd "$SDK_ROOT"
-          ./.dotnet/dotnet test test/dotnet-aot.Tests/dotnet-aot.Tests.csproj             -c Debug             --no-build             --filter "FullyQualifiedName~CurrentMainCaseCollisionSecurityTests"             --logger "console;verbosity=normal" 2>&1 | tee "$GITHUB_WORKSPACE/current-main-test.log"
+          TEST_DLL="$SDK_ROOT/artifacts/bin/dotnet-aot.Tests/Debug/net11.0/dotnet-aot.Tests.dll"
+          test -f "$TEST_DLL"
+          set +e
+          ./.dotnet/dotnet "$TEST_DLL" 2>&1 | tee "$GITHUB_WORKSPACE/current-main-test.log"
+          TEST_RC=${PIPESTATUS[0]}
+          set -e
+          echo "MTP_EXIT_CODE=$TEST_RC"
+          grep -q "CURRENT_MAIN_CASE_COLLISION=CONFIRMED" "$GITHUB_WORKSPACE/current-main-test.log"
+          grep -q "NORMALIZED_HASH_EQUAL=True" "$GITHUB_WORKSPACE/current-main-test.log"
+          grep -q "ARTIFACTS_EQUAL=True" "$GITHUB_WORKSPACE/current-main-test.log"
+          grep -q "VICTIM_PLAN=CachedLaunch" "$GITHUB_WORKSPACE/current-main-test.log"
+          grep -q "VICTIM_LAUNCH_COMMAND=/usr/bin/touch" "$GITHUB_WORKSPACE/current-main-test.log"
+          grep -q "CONTROL_PLAN=ManagedFallback" "$GITHUB_WORKSPACE/current-main-test.log"
+          echo "CURRENT_MAIN_SOURCE_PROOF=PASS"
 
       - name: Upload evidence
         if: always()
