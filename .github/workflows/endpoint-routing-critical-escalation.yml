@@ -27,7 +27,7 @@ jobs:
         with:
           dotnet-version: 11.0.100-rc.1.26425.128
 
-      - name: Build local state-changing endpoint harness
+      - name: Build explicit-routing state-changing endpoint harness
         shell: pwsh
         run: |
           $root = Join-Path $env:RUNNER_TEMP 'endpoint-routing-critical'
@@ -44,83 +44,106 @@ jobs:
           '@ | Set-Content (Join-Path $root 'Harness.csproj')
 
           @'
+          using Microsoft.AspNetCore.Hosting;
+          using Microsoft.AspNetCore.Http;
           using Microsoft.AspNetCore.Http.Features;
+          using Microsoft.AspNetCore.Routing;
+          using Microsoft.Extensions.DependencyInjection;
+          using Microsoft.Extensions.Hosting;
 
-          var builder = WebApplication.CreateBuilder(args);
-          builder.WebHost.ConfigureKestrel(o => o.ListenLocalhost(5070));
-          var app = builder.Build();
+          var markerName = "PRIVILEGED_ACTION_EXECUTED.marker";
 
-          var marker = Path.Combine(AppContext.BaseDirectory, "PRIVILEGED_ACTION_EXECUTED.marker");
-          if (File.Exists(marker))
-          {
-              File.Delete(marker);
-          }
-
-          var guardHits = 0;
-          var actionHits = 0;
-
-          app.Use(async (ctx, next) =>
-          {
-              Console.WriteLine($"TOP raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBase={ctx.Request.PathBase.Value} path={ctx.Request.Path.Value}");
-              await next();
-          });
-
-          app.UsePathBase("/api");
-
-          app.Use(async (ctx, next) =>
-          {
-              Console.WriteLine($"AFTER_PATHBASE raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBase={ctx.Request.PathBase.Value} path={ctx.Request.Path.Value}");
-
-              if (ctx.Request.Path.StartsWithSegments("/admin"))
+          await Host.CreateDefaultBuilder(args)
+              .ConfigureWebHostDefaults(web =>
               {
-                  Interlocked.Increment(ref guardHits);
-                  Console.WriteLine($"AUTH_GUARD_HIT raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} path={ctx.Request.Path.Value}");
-
-                  if (ctx.Request.Headers["X-Admin-Key"] != "research-only")
+                  web.UseKestrel(o => o.ListenLocalhost(5071));
+                  web.ConfigureServices(services =>
                   {
-                      ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                      await ctx.Response.WriteAsync("AUTH_REQUIRED");
-                      return;
-                  }
-              }
+                      services.AddRouting();
+                  });
+                  web.Configure(app =>
+                  {
+                      var marker = Path.Combine(AppContext.BaseDirectory, markerName);
+                      if (File.Exists(marker))
+                      {
+                          File.Delete(marker);
+                      }
 
-              await next();
-          });
+                      var guardHits = 0;
+                      var actionHits = 0;
 
-          app.MapPost("/admin/rotate", async ctx =>
-          {
-              Interlocked.Increment(ref actionHits);
-              File.WriteAllText(marker, "EXECUTED");
-              Console.WriteLine($"PRIVILEGED_ACTION_HIT raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBase={ctx.Request.PathBase.Value} path={ctx.Request.Path.Value}");
-              ctx.Response.StatusCode = StatusCodes.Status200OK;
-              await ctx.Response.WriteAsync("PRIVILEGED_ACTION_EXECUTED");
-          });
+                      app.Use(async (ctx, next) =>
+                      {
+                          Console.WriteLine($"TOP raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBase={ctx.Request.PathBase.Value} path={ctx.Request.Path.Value}");
+                          await next();
+                      });
 
-          app.MapGet("/evidence", async ctx =>
-          {
-              ctx.Response.ContentType = "application/json";
-              await ctx.Response.WriteAsJsonAsync(new
-              {
-                  guardHits,
-                  actionHits,
-                  markerExists = File.Exists(marker),
-                  marker
-              });
-          });
+                      // The critical composition under test:
+                      // Kestrel decodes %5C, UsePathBase consumes /api and preserves a
+                      // leading backslash in the remainder on .NET 11.
+                      app.UsePathBase("/api");
 
-          app.Run(async ctx =>
-          {
-              ctx.Response.StatusCode = StatusCodes.Status404NotFound;
-              await ctx.Response.WriteAsync("NOT_FOUND");
-          });
+                      app.Use(async (ctx, next) =>
+                      {
+                          Console.WriteLine($"AFTER_PATHBASE raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBase={ctx.Request.PathBase.Value} path={ctx.Request.Path.Value}");
 
-          await app.RunAsync();
+                          if (ctx.Request.Path.StartsWithSegments("/admin"))
+                          {
+                              Interlocked.Increment(ref guardHits);
+                              Console.WriteLine($"AUTH_GUARD_HIT raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} path={ctx.Request.Path.Value}");
+
+                              if (ctx.Request.Headers["X-Admin-Key"] != "research-only")
+                              {
+                                  ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                                  await ctx.Response.WriteAsync("AUTH_REQUIRED");
+                                  return;
+                              }
+                          }
+
+                          await next();
+                      });
+
+                      // Force endpoint routing to run AFTER UsePathBase/auth.
+                      app.UseRouting();
+
+                      app.UseEndpoints(endpoints =>
+                      {
+                          endpoints.MapPost("/admin/rotate", async ctx =>
+                          {
+                              Interlocked.Increment(ref actionHits);
+                              File.WriteAllText(marker, "EXECUTED");
+                              Console.WriteLine($"PRIVILEGED_ACTION_HIT raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBase={ctx.Request.PathBase.Value} path={ctx.Request.Path.Value}");
+                              ctx.Response.StatusCode = StatusCodes.Status200OK;
+                              await ctx.Response.WriteAsync("PRIVILEGED_ACTION_EXECUTED");
+                          });
+
+                          endpoints.MapGet("/evidence", async ctx =>
+                          {
+                              await ctx.Response.WriteAsJsonAsync(new
+                              {
+                                  guardHits,
+                                  actionHits,
+                                  markerExists = File.Exists(marker),
+                                  marker
+                              });
+                          });
+                      });
+
+                      app.Run(async ctx =>
+                      {
+                          ctx.Response.StatusCode = StatusCodes.Status404NotFound;
+                          await ctx.Response.WriteAsync("NOT_FOUND");
+                      });
+                  });
+              })
+              .Build()
+              .RunAsync();
           '@ | Set-Content (Join-Path $root 'Program.cs')
 
           dotnet build (Join-Path $root 'Harness.csproj') -c Release
           "HARNESS_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Exercise normal, authenticated, and encoded-backslash POSTs
+      - name: Exercise explicit routing with normal and encoded-backslash POSTs
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -134,11 +157,11 @@ jobs:
           ) -RedirectStandardOutput $serverLog -RedirectStandardError $serverErr -PassThru
 
           function Invoke-Raw([string]$Target, [bool]$Authenticated) {
-              $client = [System.Net.Sockets.TcpClient]::new('127.0.0.1',5070)
+              $client = [System.Net.Sockets.TcpClient]::new('127.0.0.1',5071)
               try {
                   $stream = $client.GetStream()
                   $extra = if ($Authenticated) { "X-Admin-Key: research-only`r`n" } else { "" }
-                  $req = "POST $Target HTTP/1.1`r`nHost: localhost:5070`r`nContent-Length: 0`r`n" + $extra + "Connection: close`r`n`r`n"
+                  $req = "POST $Target HTTP/1.1`r`nHost: localhost:5071`r`nContent-Length: 0`r`n" + $extra + "Connection: close`r`n`r`n"
                   $bytes = [Text.Encoding]::ASCII.GetBytes($req)
                   $stream.Write($bytes,0,$bytes.Length)
                   $stream.Flush()
@@ -153,7 +176,7 @@ jobs:
           try {
               for ($i=0; $i -lt 80; $i++) {
                   try {
-                      $tcp=[Net.Sockets.TcpClient]::new('127.0.0.1',5070)
+                      $tcp=[Net.Sockets.TcpClient]::new('127.0.0.1',5071)
                       $tcp.Dispose()
                       break
                   }
