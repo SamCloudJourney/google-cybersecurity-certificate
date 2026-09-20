@@ -732,3 +732,277 @@ jobs:
             /tmp/caddy.log
             /tmp/traefik.log
             /tmp/envoy.log
+
+
+  dataprotection-variant-fuzz:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    name: dataprotection-variant-fuzz-${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 11.0.100-rc.1.26425.128
+
+      - name: Build DataProtection differential harness
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/dp-lab
+          cat >/tmp/dp-lab/DpLab.csproj <<'EOF'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <OutputType>Exe</OutputType>
+              <TargetFramework>net11.0</TargetFramework>
+              <ImplicitUsings>enable</ImplicitUsings>
+              <Nullable>enable</Nullable>
+            </PropertyGroup>
+            <ItemGroup>
+              <FrameworkReference Include="Microsoft.AspNetCore.App" />
+            </ItemGroup>
+          </Project>
+          EOF
+
+          cat >/tmp/dp-lab/Program.cs <<'EOF'
+          using System.Buffers;
+          using System.Security.Cryptography;
+          using Microsoft.AspNetCore.DataProtection;
+          using Microsoft.AspNetCore.DataProtection.AuthenticatedEncryption.ConfigurationModel;
+          using Microsoft.Extensions.DependencyInjection;
+
+          static ServiceProvider BuildProvider(string dir, string appName, bool hmac512)
+          {
+              Directory.CreateDirectory(dir);
+              var services = new ServiceCollection();
+              var builder = services.AddDataProtection()
+                  .PersistKeysToFileSystem(new DirectoryInfo(dir))
+                  .SetApplicationName(appName);
+
+              if (hmac512)
+              {
+                  builder.UseCustomCryptographicAlgorithms(new ManagedAuthenticatedEncryptorConfiguration
+                  {
+                      EncryptionAlgorithmType = typeof(Aes),
+                      EncryptionAlgorithmKeySize = 256,
+                      ValidationAlgorithmType = typeof(HMACSHA512)
+                  });
+              }
+
+              return services.BuildServiceProvider();
+          }
+
+          static byte[] SpanProtect(ISpanDataProtector p, ReadOnlySpan<byte> plaintext)
+          {
+              var writer = new ArrayBufferWriter<byte>();
+              p.Protect(plaintext, ref writer);
+              return writer.WrittenSpan.ToArray();
+          }
+
+          static (bool ok, byte[]? plaintext, string? ex) ByteUnprotect(IDataProtector p, byte[] token)
+          {
+              try { return (true, p.Unprotect(token), null); }
+              catch (Exception e) { return (false, null, e.GetType().Name); }
+          }
+
+          static (bool ok, byte[]? plaintext, string? ex) SpanUnprotect(ISpanDataProtector p, byte[] token)
+          {
+              try
+              {
+                  var writer = new ArrayBufferWriter<byte>();
+                  p.Unprotect(token, ref writer);
+                  return (true, writer.WrittenSpan.ToArray(), null);
+              }
+              catch (Exception e) { return (false, null, e.GetType().Name); }
+          }
+
+          static IEnumerable<(string name, byte[] bytes)> Mutations(byte[] token)
+          {
+              for (int i = 0; i < token.Length; i++)
+              {
+                  var x = (byte[])token.Clone();
+                  x[i] ^= 0x01;
+                  yield return ($"flip1-{i}", x);
+              }
+
+              for (int i = 0; i < token.Length; i++)
+              {
+                  if (token[i] == 0) continue;
+                  var x = (byte[])token.Clone();
+                  x[i] = 0;
+                  yield return ($"zero-{i}", x);
+              }
+
+              foreach (var cut in new[] {0,1,3,4,15,16,19,20,21,31,32,33, token.Length-65, token.Length-64, token.Length-33, token.Length-32, token.Length-17, token.Length-16, token.Length-1})
+              {
+                  if (cut >= 0 && cut < token.Length)
+                      yield return ($"truncate-{cut}", token.AsSpan(0, cut).ToArray());
+              }
+
+              foreach (var n in new[] {1, 8, 16, 32, 64})
+              {
+                  var x = new byte[token.Length + n];
+                  token.CopyTo(x, 0);
+                  yield return ($"append-zero-{n}", x);
+              }
+
+              foreach (var n in new[] {16, 32, 64})
+              {
+                  if (token.Length >= n)
+                  {
+                      var x = (byte[])token.Clone();
+                      Array.Clear(x, x.Length - n, n);
+                      yield return ($"zero-tail-{n}", x);
+                  }
+              }
+
+              if (token.Length >= 20)
+              {
+                  var x=(byte[])token.Clone();
+                  Array.Clear(x,0,4);
+                  yield return ("zero-magic",x);
+
+                  x=(byte[])token.Clone();
+                  Array.Clear(x,4,16);
+                  yield return ("zero-keyid",x);
+              }
+
+              var rnd = new Random(1337);
+              for (int n=0;n<2500;n++)
+              {
+                  var x=(byte[])token.Clone();
+                  var edits=1+rnd.Next(4);
+                  for(int e=0;e<edits;e++)
+                  {
+                      var idx=rnd.Next(x.Length);
+                      x[idx]=(byte)rnd.Next(256);
+                  }
+                  yield return ($"random-{n}",x);
+              }
+          }
+
+          static void RequireReject(string label, IDataProtector byteProtector, ISpanDataProtector spanProtector, byte[] originalToken)
+          {
+              int total=0, accepted=0, differential=0;
+              foreach (var (name, bytes) in Mutations(originalToken))
+              {
+                  if (bytes.AsSpan().SequenceEqual(originalToken)) continue;
+                  total++;
+                  var a=ByteUnprotect(byteProtector, bytes);
+                  var b=SpanUnprotect(spanProtector, bytes);
+
+                  if (a.ok || b.ok)
+                  {
+                      accepted++;
+                      Console.WriteLine($"ACCEPTED_TAMPER label={label} mutation={name} byte={a.ok} span={b.ok} bytePlain={Convert.ToHexString(a.plaintext ?? [])} spanPlain={Convert.ToHexString(b.plaintext ?? [])}");
+                  }
+
+                  if (a.ok != b.ok || (a.ok && b.ok && !(a.plaintext ?? []).AsSpan().SequenceEqual(b.plaintext ?? [])))
+                  {
+                      differential++;
+                      Console.WriteLine($"DIFFERENTIAL label={label} mutation={name} byte={a.ok}/{a.ex} span={b.ok}/{b.ex}");
+                  }
+              }
+
+              Console.WriteLine($"MUTATION_SUMMARY label={label} total={total} accepted={accepted} differential={differential}");
+              if (accepted != 0 || differential != 0)
+                  Environment.ExitCode = 2;
+          }
+
+          static void MustFail(string label, Func<byte[]> action)
+          {
+              try
+              {
+                  var x=action();
+                  Console.WriteLine($"ISOLATION_FAILURE label={label} plaintext={Convert.ToHexString(x)}");
+                  Environment.ExitCode=3;
+              }
+              catch (CryptographicException)
+              {
+                  Console.WriteLine($"ISOLATION_OK label={label}");
+              }
+          }
+
+          var root=Path.Combine(Path.GetTempPath(),"dp-variant-"+Guid.NewGuid().ToString("N"));
+          var keysDefault=Path.Combine(root,"default");
+          var keysHmac512=Path.Combine(root,"hmac512");
+
+          foreach (var cfg in new[] {("default",keysDefault,false),("hmac512",keysHmac512,true)})
+          {
+              using var sp=BuildProvider(cfg.Item2,"lab-app",cfg.Item3);
+              var provider=sp.GetRequiredService<IDataProtectionProvider>();
+              var protector=provider.CreateProtector("primary-purpose");
+
+              if (protector is not ISpanDataProtector spanProtector)
+                  throw new Exception("Expected ISpanDataProtector on net11.0.");
+
+              foreach (var len in new[] {0,1,15,16,17,31,32,33,79,80,81,127,128,129,255,256,257,1024})
+              {
+                  var plaintext=new byte[len];
+                  RandomNumberGenerator.Fill(plaintext);
+
+                  var byteToken=protector.Protect(plaintext);
+                  var spanToken=SpanProtect(spanProtector,plaintext);
+
+                  var byteRoundtrip=protector.Unprotect(byteToken);
+                  var spanRoundtrip=SpanUnprotect(spanProtector,spanToken);
+                  if (!byteRoundtrip.AsSpan().SequenceEqual(plaintext) || !spanRoundtrip.ok || !(spanRoundtrip.plaintext ?? []).AsSpan().SequenceEqual(plaintext))
+                      throw new Exception($"Roundtrip failed cfg={cfg.Item1} len={len}");
+
+                  if (len is 0 or 1 or 31 or 32 or 79 or 80 or 81 or 255 or 256 or 257)
+                  {
+                      RequireReject($"{cfg.Item1}-byteToken-len{len}",protector,spanProtector,byteToken);
+                      RequireReject($"{cfg.Item1}-spanToken-len{len}",protector,spanProtector,spanToken);
+                  }
+              }
+
+              var pA=provider.CreateProtector("A");
+              var pB=provider.CreateProtector("B");
+              var tokA=pA.Protect("secret"u8.ToArray());
+              MustFail($"{cfg.Item1}-purpose-A-vs-B",()=>pB.Unprotect(tokA));
+
+              var nested1=provider.CreateProtector("a").CreateProtector("bc");
+              var nested2=provider.CreateProtector("ab").CreateProtector("c");
+              var nestedTok=nested1.Protect("nested"u8.ToArray());
+              MustFail($"{cfg.Item1}-nested-purpose-boundary",()=>nested2.Unprotect(nestedTok));
+
+              var emptyPurpose=provider.CreateProtector("");
+              var nulPurpose=provider.CreateProtector("\0");
+              var emptyTok=emptyPurpose.Protect("empty"u8.ToArray());
+              MustFail($"{cfg.Item1}-empty-vs-nul-purpose",()=>nulPurpose.Unprotect(emptyTok));
+          }
+
+          // Same physical key ring, different application discriminators.
+          var shared=Path.Combine(root,"shared");
+          using var appA=BuildProvider(shared,"app-A",false);
+          var providerA=appA.GetRequiredService<IDataProtectionProvider>();
+          var crossToken=providerA.CreateProtector("purpose").Protect("cross-app"u8.ToArray());
+
+          // Ensure key has been flushed before opening second provider.
+          using var appB=BuildProvider(shared,"app-B",false);
+          var providerB=appB.GetRequiredService<IDataProtectionProvider>();
+          MustFail("application-discriminator-A-vs-B",()=>providerB.CreateProtector("purpose").Unprotect(crossToken));
+
+          Console.WriteLine($"FINAL_EXIT_CODE={Environment.ExitCode}");
+          EOF
+
+          dotnet build /tmp/dp-lab/DpLab.csproj -c Release
+
+      - name: Run DataProtection differential/tamper suite
+        shell: bash
+        run: |
+          set -o pipefail
+          cd /tmp/dp-lab
+          dotnet run --no-build -c Release --project DpLab.csproj | tee dataprotection-results.log
+          test "${PIPESTATUS[0]}" -eq 0
+
+      - name: Upload DataProtection results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dataprotection-variant-fuzz-${{ matrix.os }}
+          path: /tmp/dp-lab/dataprotection-results.log
