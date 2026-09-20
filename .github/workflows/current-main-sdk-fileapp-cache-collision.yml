@@ -144,8 +144,9 @@ jobs:
                       Assert.IsNotNull(victimPlan.Launch);
                       Assert.AreEqual("/usr/bin/touch", victimPlan.Launch.Command);
                       Assert.AreEqual(marker, victimPlan.Launch.RunProperties?.Arguments);
-                      Assert.IsTrue(
-                          victimPlan.Cache?.PreviousEntry?.Directives.SequenceEqual(attackerCache.Directives) == true,
+                      Assert.AreEqual(
+                          string.Join("\n", attackerCache.Directives),
+                          string.Join("\n", victimPlan.Cache!.PreviousEntry!.Directives),
                           "Cached directives should remain identical across the colliding victim lookup.");
 
                       RunPlan controlPlan = FileBasedAppRunPlan.AnalyzeCachedLaunch(
