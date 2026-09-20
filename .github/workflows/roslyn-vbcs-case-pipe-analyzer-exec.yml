@@ -140,6 +140,15 @@ jobs:
           }
           EOF
 
+          REFDIR="$(find /usr/share/dotnet/packs/Microsoft.NETCore.App.Ref -type d -path '*/ref/net10.0' | sort -V | tail -1)"
+          test -d "$REFDIR"
+          REF_ARGS=()
+          for ref in "$REFDIR"/*.dll; do
+            REF_ARGS+=("/reference:$ref")
+          done
+          echo "REFDIR=$REFDIR"
+          echo "REF_COUNT=${#REF_ARGS[@]}"
+
           echo "=== Trusted case-distinct client uses /shared ==="
           rm -f "$MARKER"
           set +e
