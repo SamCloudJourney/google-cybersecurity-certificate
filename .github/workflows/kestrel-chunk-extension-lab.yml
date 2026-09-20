@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - lab/kestrel-chunk-extensions-20260920
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
