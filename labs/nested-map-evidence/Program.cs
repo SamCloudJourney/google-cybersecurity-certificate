@@ -6,13 +6,14 @@ using Microsoft.Extensions.FileProviders;
 var scenario = Environment.GetEnvironmentVariable("SCENARIO") ?? "map";
 var normalize = string.Equals(Environment.GetEnvironmentVariable("NORMALIZE_BACKSLASH"), "1", StringComparison.Ordinal);
 var port = int.TryParse(Environment.GetEnvironmentVariable("PORT"), out var p) ? p : 5040;
+var protocolName = Environment.GetEnvironmentVariable("PROTOCOL") ?? "http1";
 
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(o =>
 {
     o.ListenLocalhost(port, lo =>
     {
-        lo.Protocols = HttpProtocols.Http1;
+        lo.Protocols = string.Equals(protocolName, "http2", StringComparison.OrdinalIgnoreCase) ? HttpProtocols.Http2 : HttpProtocols.Http1;
     });
 });
 
@@ -29,7 +30,7 @@ var secretSha256 = Convert.ToHexString(SHA256.HashData(secretBytes));
 app.Use(async (ctx, next) =>
 {
     var raw = ctx.Features.Get<IHttpRequestFeature>()?.RawTarget;
-    Console.WriteLine($"TOP scenario={scenario} normalize={normalize} raw={raw} pathBase={ctx.Request.PathBase.Value} path={ctx.Request.Path.Value}");
+    Console.WriteLine($"TOP scenario={scenario} protocol={protocolName} normalize={normalize} raw={raw} pathBase={ctx.Request.PathBase.Value} path={ctx.Request.Path.Value}");
     await next();
 });
 
