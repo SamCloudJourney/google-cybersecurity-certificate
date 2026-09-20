@@ -23,11 +23,11 @@ jobs:
         with:
           dotnet-version: 11.0.100-rc.1.26425.128
 
-      - name: Build local evidence server
+      - name: Build local evidence server and install h2 client library
         shell: pwsh
         run: |
           dotnet build .\labs\nested-map-evidence\NestedMapEvidence.csproj -c Release -p:EvidenceTfm=net11.0
-          curl.exe --version
+          python -m pip install --disable-pip-version-check h2
 
       - name: Run loopback HTTP2 cases
         shell: pwsh
@@ -59,62 +59,108 @@ jobs:
 
             New-Item -ItemType Directory -Force -Path http2-results | Out-Null
 
-            function Invoke-H2([string]$Name, [string]$Path, [bool]$Authenticated) {
-              $headerFile = "http2-results\$Name.headers"
-              $bodyFile = "http2-results\$Name.body"
-              $args = @(
-                '--http2-prior-knowledge',
-                '--path-as-is',
-                '--silent',
-                '--show-error',
-                '--dump-header', $headerFile,
-                '--output', $bodyFile
-              )
-              if ($Authenticated) {
-                $args += @('-H','X-Admin-Key: research-only')
+            @'
+          import hashlib
+          import json
+          import socket
+
+          from h2.config import H2Configuration
+          from h2.connection import H2Connection
+          from h2.events import DataReceived, ResponseReceived, StreamEnded, StreamReset
+
+          HOST = "127.0.0.1"
+          PORT = 5050
+
+          def send_case(name, path, authenticated=False):
+              sock = socket.create_connection((HOST, PORT), timeout=5)
+              sock.settimeout(5)
+
+              conn = H2Connection(config=H2Configuration(client_side=True, header_encoding="utf-8"))
+              conn.initiate_connection()
+              sock.sendall(conn.data_to_send())
+
+              stream_id = conn.get_next_available_stream_id()
+              headers = [
+                  (":method", "GET"),
+                  (":authority", f"{HOST}:{PORT}"),
+                  (":scheme", "http"),
+                  (":path", path),
+              ]
+              if authenticated:
+                  headers.append(("x-admin-key", "research-only"))
+
+              conn.send_headers(stream_id, headers, end_stream=True)
+              sock.sendall(conn.data_to_send())
+
+              response_headers = []
+              body = bytearray()
+              done = False
+
+              while not done:
+                  data = sock.recv(65535)
+                  if not data:
+                      break
+
+                  for event in conn.receive_data(data):
+                      if isinstance(event, ResponseReceived) and event.stream_id == stream_id:
+                          response_headers = list(event.headers)
+                      elif isinstance(event, DataReceived) and event.stream_id == stream_id:
+                          body.extend(event.data)
+                          conn.acknowledge_received_data(event.flow_controlled_length, stream_id)
+                      elif isinstance(event, StreamEnded) and event.stream_id == stream_id:
+                          done = True
+                      elif isinstance(event, StreamReset) and event.stream_id == stream_id:
+                          raise RuntimeError(f"stream reset: {event.error_code}")
+
+                  pending = conn.data_to_send()
+                  if pending:
+                      sock.sendall(pending)
+
+              sock.close()
+              header_map = dict(response_headers)
+              body_bytes = bytes(body)
+              return {
+                  "name": name,
+                  "path": path,
+                  "authenticated": authenticated,
+                  "status": int(header_map.get(":status", "0")),
+                  "response_headers": response_headers,
+                  "body_text": body_bytes.decode("utf-8", "replace"),
+                  "body_sha256": hashlib.sha256(body_bytes).hexdigest().upper(),
+                  "contains_secret": b"TOP_SECRET_7B4F" in body_bytes,
               }
-              $args += "http://127.0.0.1:5050$Path"
 
-              & curl.exe @args
-              if ($LASTEXITCODE -ne 0) { throw "curl failed for $Name" }
+          results = [
+              send_case("normal_no_auth", "/api/admin/secret.txt", False),
+              send_case("normal_with_auth", "/api/admin/secret.txt", True),
+              send_case("encoded_parent_boundary", "/api%5Cadmin%5Csecret.txt", False),
+              send_case("encoded_parent_boundary_mixed", "/api%5Cadmin/secret.txt", False),
+              send_case("encoded_child_boundary", "/api/admin%5Csecret.txt", False),
+          ]
 
-              $headers = Get-Content $headerFile -Raw
-              $body = Get-Content $bodyFile -Raw
-              $sha = (Get-FileHash $bodyFile -Algorithm SHA256).Hash
-              [ordered]@{
-                name = $Name
-                path = $Path
-                authenticated = $Authenticated
-                headers = $headers
-                body = $body
-                body_sha256 = $sha
-              }
-            }
+          with open("http2-results/results.json", "w", encoding="utf-8") as f:
+              json.dump(results, f, indent=2)
 
-            $results = [ordered]@{
-              normal_no_auth = Invoke-H2 'normal_no_auth' '/api/admin/secret.txt' $false
-              normal_with_auth = Invoke-H2 'normal_with_auth' '/api/admin/secret.txt' $true
-              encoded_parent_boundary = Invoke-H2 'encoded_parent_boundary' '/api%5Cadmin%5Csecret.txt' $false
-              encoded_parent_boundary_mixed = Invoke-H2 'encoded_parent_boundary_mixed' '/api%5Cadmin/secret.txt' $false
-              encoded_child_boundary = Invoke-H2 'encoded_child_boundary' '/api/admin%5Csecret.txt' $false
-            }
+          print(json.dumps(results, indent=2))
 
-            $results | ConvertTo-Json -Depth 6 | Set-Content http2-results\results.json
-            Get-Content http2-results\results.json
+          by_name = {item["name"]: item for item in results}
+          assert by_name["normal_no_auth"]["status"] == 401
+          assert by_name["normal_with_auth"]["status"] == 200
+          assert by_name["normal_with_auth"]["contains_secret"] is True
+          assert by_name["encoded_parent_boundary"]["status"] == 200
+          assert by_name["encoded_parent_boundary"]["contains_secret"] is True
+          assert by_name["encoded_parent_boundary_mixed"]["status"] == 200
+          assert by_name["encoded_parent_boundary_mixed"]["contains_secret"] is True
+          assert by_name["encoded_child_boundary"]["status"] == 401
+          assert by_name["encoded_child_boundary"]["contains_secret"] is False
 
-            $normalDenied = $results.normal_no_auth.headers -match '401'
-            $normalAllowed = ($results.normal_with_auth.headers -match '200') -and ($results.normal_with_auth.body -match 'TOP_SECRET_7B4F')
-            $parentCase = ($results.encoded_parent_boundary.headers -match '200') -and ($results.encoded_parent_boundary.body -match 'TOP_SECRET_7B4F')
-            $parentMixedCase = ($results.encoded_parent_boundary_mixed.headers -match '200') -and ($results.encoded_parent_boundary_mixed.body -match 'TOP_SECRET_7B4F')
-            $childNegative = $results.encoded_child_boundary.headers -match '401'
+          expected_hash = by_name["normal_with_auth"]["body_sha256"]
+          assert by_name["encoded_parent_boundary"]["body_sha256"] == expected_hash
+          assert by_name["encoded_parent_boundary_mixed"]["body_sha256"] == expected_hash
+          '@ | Set-Content http2_probe.py
 
-            if (-not ($normalDenied -and $normalAllowed -and $parentCase -and $parentMixedCase -and $childNegative)) {
-              throw 'HTTP/2 result matrix did not match the expected security controls.'
-            }
-
-            if ($results.normal_with_auth.body_sha256 -ne $results.encoded_parent_boundary.body_sha256) {
-              throw 'HTTP/2 encoded parent-boundary case did not return the same resource bytes.'
-            }
+            python http2_probe.py
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
             Start-Sleep -Milliseconds 500
             Write-Host '=== SERVER LOG ==='
