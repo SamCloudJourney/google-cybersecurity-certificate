@@ -32,7 +32,7 @@ jobs:
           TRUSTED_DIR="$ROOT/TrustedCompiler"
           BINDIR="/usr/share/dotnet/sdk/10.0.401/Roslyn/bincore"
           ANALYZER_SRC="$ROOT/analyzer-src"
-          ANALYZER_OUT="$ANALYZER_SRC/bin/Release/net10.0/MarkerAnalyzer.dll"
+          ANALYZER_OUT="$ANALYZER_SRC/bin/Release/netstandard2.0/MarkerAnalyzer.dll"
           MARKER="$ROOT/ANALYZER_EXECUTED.marker"
           LOG="$ROOT/roslyn-client-server.log"
 
@@ -52,7 +52,7 @@ jobs:
           cat > "$ANALYZER_SRC/MarkerAnalyzer.csproj" <<EOF
           <Project Sdk="Microsoft.NET.Sdk">
             <PropertyGroup>
-              <TargetFramework>net10.0</TargetFramework>
+              <TargetFramework>netstandard2.0</TargetFramework>
               <Nullable>enable</Nullable>
               <ImplicitUsings>disable</ImplicitUsings>
             </PropertyGroup>
@@ -83,7 +83,7 @@ jobs:
                   "Safe research marker",
                   "Safe research marker",
                   "Research",
-                  DiagnosticSeverity.Info,
+                  DiagnosticSeverity.Warning,
                   isEnabledByDefault: true);
 
               public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics
@@ -91,6 +91,8 @@ jobs:
 
               public override void Initialize(AnalysisContext context)
               {
+                  context.EnableConcurrentExecution();
+                  context.ConfigureGeneratedCodeAnalysis(GeneratedCodeAnalysisFlags.None);
                   context.RegisterCompilationAction(compilationContext =>
                   {
                       File.WriteAllText(@"$MARKER", "ANALYZER_EXECUTED_DURING_LATER_TRUSTED_COMPILE");
