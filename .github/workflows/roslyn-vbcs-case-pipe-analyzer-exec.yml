@@ -91,7 +91,11 @@ jobs:
 
               public override void Initialize(AnalysisContext context)
               {
-                  File.WriteAllText(@"$MARKER", "ANALYZER_EXECUTED_DURING_LATER_TRUSTED_COMPILE");
+                  context.RegisterCompilationAction(compilationContext =>
+                  {
+                      File.WriteAllText(@"$MARKER", "ANALYZER_EXECUTED_DURING_LATER_TRUSTED_COMPILE");
+                      compilationContext.ReportDiagnostic(Diagnostic.Create(Rule, Location.None));
+                  });
               }
           }
           EOF
@@ -149,6 +153,26 @@ jobs:
           echo "REFDIR=$REFDIR"
           echo "REF_COUNT=${#REF_ARGS[@]}"
 
+          echo "=== Sanity: explicit analyzer on trusted standalone compiler ==="
+          rm -f "$MARKER"
+          set +e
+          dotnet "$TRUSTED_DIR/csc.dll" \
+            /nologo \
+            /target:library \
+            "${REF_ARGS[@]}" \
+            "/analyzer:$ANALYZER_OUT" \
+            "$ROOT/victim.cs" \
+            /out:"$ROOT/sanity.dll" \
+            >"$ROOT/sanity.stdout" 2>"$ROOT/sanity.stderr"
+          SANITY_RC=$?
+          set -e
+          cat "$ROOT/sanity.stdout"
+          cat "$ROOT/sanity.stderr"
+          echo "SANITY_RC=$SANITY_RC"
+          test -f "$MARKER"
+          grep -q "SAFE001" "$ROOT/sanity.stdout" "$ROOT/sanity.stderr"
+          echo "ANALYZER_SANITY=PASS_EXPLICIT_ANALYZER_EXECUTED"
+
           echo "=== Trusted case-distinct client uses /shared ==="
           rm -f "$MARKER"
           set +e
@@ -159,12 +183,13 @@ jobs:
           cat "$ROOT/victim.stderr"
           echo "VICTIM_RC=$VICTIM_RC"
 
+          SHARED_EXECUTED=false
           if test -f "$MARKER"; then
             cat "$MARKER"
             echo "ANALYZER_EXEC_RESULT=ATTACKER_ANALYZER_EXECUTED_DURING_TRUSTED_SHARED_COMPILE"
+            SHARED_EXECUTED=true
           else
             echo "ANALYZER_EXEC_RESULT=NOT_REPRODUCED"
-            exit 1
           fi
 
           echo "=== Causal control: same trusted compiler, no /shared ==="
@@ -187,6 +212,8 @@ jobs:
           echo "=== Evidence log ==="
           cat "$LOG" || true
 
+          cp "$ROOT/sanity.stdout" "$GITHUB_WORKSPACE/roslyn-analyzer-sanity.stdout"
+          cp "$ROOT/sanity.stderr" "$GITHUB_WORKSPACE/roslyn-analyzer-sanity.stderr"
           cp "$ROOT/seed.stdout" "$GITHUB_WORKSPACE/roslyn-analyzer-seed.stdout"
           cp "$ROOT/seed.stderr" "$GITHUB_WORKSPACE/roslyn-analyzer-seed.stderr"
           cp "$ROOT/victim.stdout" "$GITHUB_WORKSPACE/roslyn-analyzer-victim.stdout"
@@ -195,6 +222,12 @@ jobs:
           cp "$ROOT/control.stderr" "$GITHUB_WORKSPACE/roslyn-analyzer-control.stderr"
           cp "$MARKER" "$GITHUB_WORKSPACE/roslyn-analyzer-marker.txt" 2>/dev/null || true
           cp "$LOG" "$GITHUB_WORKSPACE/roslyn-analyzer-client-server.log" || true
+
+          if [ "$SHARED_EXECUTED" != "true" ]; then
+            echo "FINAL_RESULT=SHARED_ANALYZER_DID_NOT_EXECUTE"
+            exit 1
+          fi
+          echo "FINAL_RESULT=SHARED_ANALYZER_EXECUTION_CONFIRMED"
 
       - name: Upload evidence
         if: always()
