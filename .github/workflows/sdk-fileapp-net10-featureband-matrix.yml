@@ -34,13 +34,19 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          dotnet --info
-
           ROOT="$RUNNER_TEMP/net10-featureband-${{ matrix.sdk }}"
+          rm -rf "$ROOT"
+          mkdir -p "$ROOT"
+          cd "$ROOT"
+
+          # Run outside the checked-out research repo so its global.json cannot
+          # silently select a different SDK feature band.
+          dotnet --version
+          dotnet --info
           A="$ROOT/victim/Program.cs"
           V="$ROOT/VICTIM/Program.cs"
           MARKER="$RUNNER_TEMP/NET10_FEATUREBAND_${{ matrix.sdk }}.marker"
-          rm -rf "$ROOT"; rm -f "$MARKER"
+          rm -f "$MARKER"
           mkdir -p "$(dirname "$A")" "$(dirname "$V")"
 
           cat > "$A" <<EOF
