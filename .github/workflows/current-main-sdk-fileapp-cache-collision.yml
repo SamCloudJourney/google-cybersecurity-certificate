@@ -47,11 +47,6 @@ jobs:
               [TestMethod]
               public void LinuxCaseSensitivePathsCollideAndVictimAcceptsAttackerRunProperties()
               {
-                  if (!OperatingSystem.IsLinux())
-                  {
-                      Assert.Inconclusive("This regression targets case-sensitive Linux path semantics.");
-                  }
-
                   string root = Path.Join(Path.GetTempPath(), "sdk-current-main-cache-collision-" + Guid.NewGuid().ToString("N"));
                   string attackerDirectory = Path.Join(root, "victim");
                   string victimDirectory = Path.Join(root, "VICTIM");
