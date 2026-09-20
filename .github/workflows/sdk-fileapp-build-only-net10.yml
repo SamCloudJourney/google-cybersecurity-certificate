@@ -1,0 +1,116 @@
+name: SDK file-app build-only poisoning .NET 10
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/sdk-fileapp-build-only-net10.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  net10-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.401
+
+      - name: Build-only cache poison on stable SDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          dotnet --info
+
+          ROOT="$RUNNER_TEMP/sdk-fileapp-build-only-net10"
+          LOWER="$ROOT/victim/Program.cs"
+          UPPER="$ROOT/VICTIM/Program.cs"
+          MARKER="$RUNNER_TEMP/SDK_FILEAPP_NET10_ATTACKER.marker"
+
+          rm -rf "$ROOT"
+          rm -f "$MARKER"
+          mkdir -p "$(dirname "$LOWER")" "$(dirname "$UPPER")"
+
+          cat > "$LOWER" <<EOF
+          using System;
+          using System.IO;
+          File.WriteAllText(@"$MARKER", "ATTACKER");
+          Console.WriteLine("NET10_ATTACKER_PAYLOAD_EXECUTED");
+          EOF
+
+          cat > "$UPPER" <<'EOF'
+          using System;
+          Console.WriteLine("NET10_TRUSTED_VICTIM_EXECUTED");
+          EOF
+
+          touch -d '2020-01-01T00:00:00Z' "$LOWER" "$UPPER"
+
+          python3 - "$LOWER" "$UPPER" <<'PY'
+          import hashlib, sys
+          for p in sys.argv[1:]:
+              print(p, hashlib.sha256(p.upper().encode()).hexdigest())
+          print("CASE_NORMALIZED_PATHS_EQUAL=", sys.argv[1].upper() == sys.argv[2].upper())
+          PY
+
+          echo '=== BUILD ONLY ATTACKER ==='
+          dotnet build "$LOWER" > "$ROOT/build.stdout" 2> "$ROOT/build.stderr"
+          cat "$ROOT/build.stdout"
+          cat "$ROOT/build.stderr"
+          if test -f "$MARKER"; then
+            echo 'NET10_BUILD_ONLY_PRECONDITION=FAILED'
+            exit 1
+          fi
+          echo 'NET10_BUILD_ONLY_PRECONDITION=PASS'
+
+          echo '=== TRUSTED VICTIM NORMAL RUN ==='
+          rm -f "$MARKER"
+          dotnet run --file "$UPPER" > "$ROOT/victim.stdout" 2> "$ROOT/victim.stderr"
+          cat "$ROOT/victim.stdout"
+          cat "$ROOT/victim.stderr"
+
+          if grep -q 'NET10_ATTACKER_PAYLOAD_EXECUTED' "$ROOT/victim.stdout" && test -f "$MARKER"; then
+            echo 'NET10_POISON_RESULT=ATTACKER_EXECUTED_DURING_TRUSTED_RUN'
+          elif grep -q 'NET10_TRUSTED_VICTIM_EXECUTED' "$ROOT/victim.stdout"; then
+            echo 'NET10_POISON_RESULT=VICTIM_SAFE'
+          else
+            echo 'NET10_POISON_RESULT=UNKNOWN'
+          fi
+
+          echo '=== NO-CACHE CONTROL ==='
+          rm -f "$MARKER"
+          dotnet run --file "$UPPER" --no-cache > "$ROOT/nocache.stdout" 2> "$ROOT/nocache.stderr"
+          cat "$ROOT/nocache.stdout"
+          cat "$ROOT/nocache.stderr"
+
+          if grep -q 'NET10_TRUSTED_VICTIM_EXECUTED' "$ROOT/nocache.stdout" && ! test -f "$MARKER"; then
+            echo 'NET10_NO_CACHE_CONTROL=TRUSTED_VICTIM_EXECUTED'
+          else
+            echo 'NET10_NO_CACHE_CONTROL=FAILED'
+            exit 1
+          fi
+
+          cp "$ROOT/build.stdout" "$GITHUB_WORKSPACE/net10-build.stdout"
+          cp "$ROOT/build.stderr" "$GITHUB_WORKSPACE/net10-build.stderr"
+          cp "$ROOT/victim.stdout" "$GITHUB_WORKSPACE/net10-victim.stdout"
+          cp "$ROOT/victim.stderr" "$GITHUB_WORKSPACE/net10-victim.stderr"
+          cp "$ROOT/nocache.stdout" "$GITHUB_WORKSPACE/net10-nocache.stdout"
+          cp "$ROOT/nocache.stderr" "$GITHUB_WORKSPACE/net10-nocache.stderr"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-fileapp-build-only-net10
+          path: |
+            net10-build.stdout
+            net10-build.stderr
+            net10-victim.stdout
+            net10-victim.stderr
+            net10-nocache.stdout
+            net10-nocache.stderr
