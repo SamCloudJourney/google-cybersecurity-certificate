@@ -58,14 +58,7 @@ jobs:
               <ImplicitUsings>disable</ImplicitUsings>
             </PropertyGroup>
             <ItemGroup>
-              <Reference Include="Microsoft.CodeAnalysis">
-                <HintPath>$BINDIR/Microsoft.CodeAnalysis.dll</HintPath>
-                <Private>false</Private>
-              </Reference>
-              <Reference Include="Microsoft.CodeAnalysis.CSharp">
-                <HintPath>$BINDIR/Microsoft.CodeAnalysis.CSharp.dll</HintPath>
-                <Private>false</Private>
-              </Reference>
+              <PackageReference Include="Microsoft.CodeAnalysis.Common" Version="4.14.0" PrivateAssets="all" />
             </ItemGroup>
           </Project>
           EOF
