@@ -186,7 +186,7 @@ jobs:
         run: |
           set -euxo pipefail
           cd "$SDK_ROOT"
-          ./build.sh -projects test/dotnet-aot.Tests/dotnet-aot.Tests.csproj -c Debug 2>&1 | tee "$GITHUB_WORKSPACE/current-main-build.log"
+          ./build.sh -projects "$SDK_ROOT/test/dotnet-aot.Tests/dotnet-aot.Tests.csproj" -c Debug 2>&1 | tee "$GITHUB_WORKSPACE/current-main-build.log"
 
       - name: Run focused current-main regression
         shell: bash
