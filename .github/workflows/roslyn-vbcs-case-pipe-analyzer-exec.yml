@@ -152,7 +152,7 @@ jobs:
           echo "=== Trusted case-distinct client uses /shared ==="
           rm -f "$MARKER"
           set +e
-          dotnet "$TRUSTED_DIR/csc.dll"             /shared             /nologo             /target:library             "$ROOT/victim.cs"             /out:"$ROOT/victim.dll"             >"$ROOT/victim.stdout" 2>"$ROOT/victim.stderr"
+          dotnet "$TRUSTED_DIR/csc.dll"             /shared             /nologo             /target:library             "${REF_ARGS[@]}"             "$ROOT/victim.cs"             /out:"$ROOT/victim.dll"             >"$ROOT/victim.stdout" 2>"$ROOT/victim.stderr"
           VICTIM_RC=$?
           set -e
           cat "$ROOT/victim.stdout"
@@ -170,7 +170,7 @@ jobs:
           echo "=== Causal control: same trusted compiler, no /shared ==="
           rm -f "$MARKER"
           set +e
-          dotnet "$TRUSTED_DIR/csc.dll"             /nologo             /target:library             "$ROOT/victim.cs"             /out:"$ROOT/control.dll"             >"$ROOT/control.stdout" 2>"$ROOT/control.stderr"
+          dotnet "$TRUSTED_DIR/csc.dll"             /nologo             /target:library             "${REF_ARGS[@]}"             "$ROOT/victim.cs"             /out:"$ROOT/control.dll"             >"$ROOT/control.stdout" 2>"$ROOT/control.stderr"
           CONTROL_RC=$?
           set -e
           cat "$ROOT/control.stdout"
