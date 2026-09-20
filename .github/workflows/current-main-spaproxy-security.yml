@@ -1,0 +1,218 @@
+name: Current main SpaProxy authorization-boundary evidence
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/current-main-spaproxy-security.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  spaproxy-boundary:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 50
+    name: spaproxy-boundary-${{ matrix.os }}
+    steps:
+      - name: Clone current ASP.NET Core main
+        shell: pwsh
+        run: |
+          $root = if ($IsWindows) { 'D:\aspnetcore-spa-main' } else { '/tmp/aspnetcore-spa-main' }
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/dotnet/aspnetcore.git $root
+          Set-Location $root
+          git rev-parse HEAD | Set-Content (Join-Path $env:GITHUB_WORKSPACE 'aspnetcore-main-sha.txt')
+          "ASPNET_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Add source-level Map-to-SpaProxy security regression
+        shell: pwsh
+        run: |
+          $root = $env:ASPNET_ROOT
+          @'
+          // Licensed to the .NET Foundation under one or more agreements.
+          // The .NET Foundation licenses this file to you under the MIT license.
+
+          using System.Net;
+          using Microsoft.AspNetCore.Builder;
+          using Microsoft.AspNetCore.Http;
+          using Microsoft.AspNetCore.SpaServices.Extensions.Proxy;
+          using Microsoft.Extensions.DependencyInjection;
+          using Moq;
+          using Moq.Protected;
+          using Xunit;
+
+          namespace Microsoft.AspNetCore.SpaServices.Extensions.Tests;
+
+          public class NestedMapSpaProxySecurityRegressionTests
+          {
+              private static HttpClient CreateCapturingClient(Action<HttpRequestMessage> capture)
+              {
+                  var handler = new Mock<HttpMessageHandler>();
+                  handler.Protected()
+                      .Setup<Task<HttpResponseMessage>>(
+                          "SendAsync",
+                          ItExpr.IsAny<HttpRequestMessage>(),
+                          ItExpr.IsAny<CancellationToken>())
+                      .Callback<HttpRequestMessage, CancellationToken>((req, _) => capture(req))
+                      .ReturnsAsync(new HttpResponseMessage
+                      {
+                          StatusCode = HttpStatusCode.OK,
+                          Content = new StringContent("BACKEND_ACTION_EXECUTED")
+                      });
+
+                  return new HttpClient(handler.Object);
+              }
+
+              [Fact]
+              public async Task NestedMap_BackslashRemainder_SkipsGuard_AndSpaProxyNormalizesToPrivilegedPost()
+              {
+                  HttpRequestMessage? forwarded = null;
+                  using var client = CreateCapturingClient(req => forwarded = req);
+
+                  var services = new ServiceCollection().BuildServiceProvider();
+                  var appBuilder = new ApplicationBuilder(services);
+                  var guardHits = 0;
+
+                  appBuilder.Map("/api", api =>
+                  {
+                      api.Map("/admin", admin =>
+                      {
+                          admin.Run(async context =>
+                          {
+                              guardHits++;
+                              context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                              await context.Response.WriteAsync("AUTH_REQUIRED");
+                          });
+                      });
+
+                      api.Run(async context =>
+                      {
+                          await SpaProxy.PerformProxyRequest(
+                              context,
+                              client,
+                              Task.FromResult(new Uri("http://127.0.0.1:59999")),
+                              CancellationToken.None,
+                              proxy404s: true);
+                      });
+                  });
+
+                  var app = appBuilder.Build();
+
+                  // Positive control: the normal privileged path hits the auth boundary
+                  // and never reaches the downstream proxy.
+                  var normal = new DefaultHttpContext();
+                  normal.Request.Method = HttpMethods.Post;
+                  normal.Request.Path = "/api/admin/rotate";
+                  normal.Request.Body = new MemoryStream("x"u8.ToArray());
+                  normal.Response.Body = new MemoryStream();
+
+                  await app(normal);
+
+                  Assert.Equal(1, guardHits);
+                  Assert.Equal(StatusCodes.Status401Unauthorized, normal.Response.StatusCode);
+                  Assert.Null(forwarded);
+
+                  guardHits = 0;
+
+                  // This is the decoded request-path state produced by Kestrel for
+                  // /api%5Cadmin%5Crotate after PR #67093's first boundary match.
+                  var bypass = new DefaultHttpContext();
+                  bypass.Request.Method = HttpMethods.Post;
+                  bypass.Request.Path = "/api\\admin\\rotate";
+                  bypass.Request.Body = new MemoryStream("state-change=1"u8.ToArray());
+                  bypass.Response.Body = new MemoryStream();
+
+                  await app(bypass);
+
+                  Assert.Equal(0, guardHits);
+                  Assert.NotNull(forwarded);
+                  Assert.Equal(HttpMethod.Post, forwarded!.Method);
+
+                  // Critical semantic transition: preserved backslashes are normalized
+                  // by SpaProxy's System.Uri construction into the privileged slash path.
+                  Assert.Equal("/admin/rotate", forwarded.RequestUri!.AbsolutePath);
+                  Assert.Equal("http://127.0.0.1:59999/admin/rotate", forwarded.RequestUri.ToString());
+
+                  // Causal control: changing only separators restores the auth boundary.
+                  forwarded = null;
+                  var normalized = new DefaultHttpContext();
+                  normalized.Request.Method = HttpMethods.Post;
+                  normalized.Request.Path = "/api/admin/rotate";
+                  normalized.Request.Body = new MemoryStream("state-change=1"u8.ToArray());
+                  normalized.Response.Body = new MemoryStream();
+
+                  await app(normalized);
+
+                  Assert.Equal(1, guardHits);
+                  Assert.Equal(StatusCodes.Status401Unauthorized, normalized.Response.StatusCode);
+                  Assert.Null(forwarded);
+              }
+
+              [Theory]
+              [InlineData("\\admin\\rotate", "/admin/rotate")]
+              [InlineData("\\admin/rotate", "/admin/rotate")]
+              [InlineData("\\admin\\rotate?x=1", "/admin/rotate")]
+              public async Task SpaProxy_NormalizesBackslashRemainder_ToSlashPath(string path, string expectedPath)
+              {
+                  HttpRequestMessage? forwarded = null;
+                  using var client = CreateCapturingClient(req => forwarded = req);
+
+                  var context = new DefaultHttpContext();
+                  context.Request.Method = HttpMethods.Post;
+                  context.Request.Path = path.Split('?')[0];
+                  context.Request.QueryString = path.Contains('?') ? new QueryString("?" + path.Split('?')[1]) : QueryString.Empty;
+                  context.Request.Body = new MemoryStream("x"u8.ToArray());
+                  context.Response.Body = new MemoryStream();
+
+                  await SpaProxy.PerformProxyRequest(
+                      context,
+                      client,
+                      Task.FromResult(new Uri("http://127.0.0.1:59999")),
+                      CancellationToken.None,
+                      proxy404s: true);
+
+                  Assert.NotNull(forwarded);
+                  Assert.Equal(HttpMethod.Post, forwarded!.Method);
+                  Assert.Equal(expectedPath, forwarded.RequestUri!.AbsolutePath);
+              }
+          }
+          '@ | Set-Content (Join-Path $root 'src/Middleware/Spa/SpaServices.Extensions/test/NestedMapSpaProxySecurityRegressionTests.cs')
+
+      - name: Restore repository
+        shell: pwsh
+        run: |
+          Set-Location $env:ASPNET_ROOT
+          if ($IsWindows) {
+            .\restore.cmd
+            . .\activate.ps1
+          } else {
+            ./restore.sh
+            bash -lc "source ./activate.sh && dotnet --info"
+          }
+
+      - name: Run focused SpaProxy security test
+        shell: pwsh
+        run: |
+          Set-Location $env:ASPNET_ROOT
+          if ($IsWindows) {
+            . .\activate.ps1
+            dotnet test src\Middleware\Spa\SpaServices.Extensions\test\Microsoft.AspNetCore.SpaServices.Extensions.Tests.csproj --filter "FullyQualifiedName~NestedMapSpaProxySecurityRegressionTests" --logger "console;verbosity=normal" | Tee-Object -FilePath (Join-Path $env:GITHUB_WORKSPACE 'spaproxy-security.log')
+          } else {
+            bash -lc "source ./activate.sh && dotnet test src/Middleware/Spa/SpaServices.Extensions/test/Microsoft.AspNetCore.SpaServices.Extensions.Tests.csproj --filter 'FullyQualifiedName~NestedMapSpaProxySecurityRegressionTests' --logger 'console;verbosity=normal'" | Tee-Object -FilePath (Join-Path $env:GITHUB_WORKSPACE 'spaproxy-security.log')
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: spaproxy-security-${{ matrix.os }}
+          path: |
+            aspnetcore-main-sha.txt
+            spaproxy-security.log
