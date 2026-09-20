@@ -1,0 +1,178 @@
+name: Nested Map security evidence
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - 'labs/nested-map-evidence/**'
+      - '.github/workflows/nested-map-security-evidence.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-version-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: net10-10.0.12
+            sdk: 10.0.401
+            tfm: net10.0
+            port: 5040
+          - label: net11-rc1
+            sdk: 11.0.100-rc.1.26425.128
+            tfm: net11.0
+            port: 5041
+    runs-on: windows-latest
+    name: windows-${{ matrix.label }}-stock-map
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.sdk }}
+
+      - name: Run stock nested Map evidence
+        shell: pwsh
+        run: |
+          ./labs/nested-map-evidence/probe.ps1 -Scenario map -Port ${{ matrix.port }} -Tfm ${{ matrix.tfm }}
+
+      - name: Upload stock Map evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nested-map-stock-${{ matrix.label }}
+          path: labs/nested-map-evidence/out-*
+
+  windows-net11-controls:
+    runs-on: windows-latest
+    name: windows-net11-causal-and-sibling-controls
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 11.0.100-rc.1.26425.128
+
+      - name: Causal normalization control
+        shell: pwsh
+        run: |
+          ./labs/nested-map-evidence/probe.ps1 -Scenario map -Port 5042 -Tfm net11.0 -Normalize
+
+      - name: UsePathBase sibling reproduction
+        shell: pwsh
+        run: |
+          ./labs/nested-map-evidence/probe.ps1 -Scenario pathbase -Port 5043 -Tfm net11.0
+
+      - name: Upload causal and sibling evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nested-map-net11-controls
+          path: labs/nested-map-evidence/out-*
+
+  linux-net11-negative:
+    runs-on: ubuntu-latest
+    name: linux-net11-platform-negative
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 11.0.100-rc.1.26425.128
+
+      - name: Run identical Map harness on Linux
+        shell: pwsh
+        run: |
+          ./labs/nested-map-evidence/probe.ps1 -Scenario map -Port 5044 -Tfm net11.0
+
+      - name: Upload Linux negative evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nested-map-linux-negative
+          path: labs/nested-map-evidence/out-*
+
+  current-main-source-invariant:
+    runs-on: windows-latest
+    timeout-minutes: 50
+    name: current-main-source-invariant
+    steps:
+      - name: Clone current ASP.NET Core main
+        shell: pwsh
+        run: |
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/dotnet/aspnetcore.git D:\aspnetcore-main
+          Set-Location D:\aspnetcore-main
+          git rev-parse HEAD | Tee-Object -FilePath D:\aspnetcore-main-sha.txt
+
+      - name: Add non-mutating regression observation test
+        shell: pwsh
+        run: |
+          @'
+          using Xunit;
+
+          namespace Microsoft.AspNetCore.Http;
+
+          public class NestedBackslashCompositionSecurityRegressionTests
+          {
+              [Fact]
+              public void CurrentMain_BackslashBoundaryFailsToComposeAcrossNestedSegments()
+              {
+                  var original = new PathString("/api\\admin\\secret.txt");
+
+                  Assert.True(original.StartsWithSegments(
+                      new PathString("/api"),
+                      out var outerMatched,
+                      out var remaining));
+
+                  Assert.Equal("/api", outerMatched.Value);
+                  Assert.Equal("\\admin\\secret.txt", remaining.Value);
+
+                  // This is the composition failure: the first segment matcher treats
+                  // backslash as a boundary, but preserves it at the beginning of the
+                  // remainder. The identical matcher cannot then consume the next
+                  // ordinary slash-prefixed nested segment.
+                  Assert.False(remaining.StartsWithSegments(
+                      new PathString("/admin"),
+                      out _,
+                      out _));
+
+                  // A normalization-only causal control restores composition.
+                  var normalized = new PathString(remaining.Value!.Replace('\\', '/'));
+                  Assert.True(normalized.StartsWithSegments(
+                      new PathString("/admin"),
+                      out var innerMatched,
+                      out var finalRemaining));
+
+                  Assert.Equal("/admin", innerMatched.Value);
+                  Assert.Equal("/secret.txt", finalRemaining.Value);
+              }
+          }
+          '@ | Set-Content D:\aspnetcore-main\src\Http\Http.Abstractions\test\NestedBackslashCompositionSecurityRegressionTests.cs
+
+      - name: Restore current main
+        shell: pwsh
+        run: |
+          Set-Location D:\aspnetcore-main
+          .\restore.cmd
+          . .\activate.ps1
+          dotnet --info
+
+      - name: Execute current-main invariant test
+        shell: pwsh
+        run: |
+          Set-Location D:\aspnetcore-main
+          . .\activate.ps1
+          dotnet test src\Http\Http.Abstractions\test\Microsoft.AspNetCore.Http.Abstractions.Tests.csproj `
+            --filter "FullyQualifiedName~NestedBackslashCompositionSecurityRegressionTests" `
+            --logger "console;verbosity=normal" | Tee-Object -FilePath D:\aspnetcore-main-invariant.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload current-main evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aspnetcore-main-nested-map-invariant
+          path: |
+            D:\aspnetcore-main-sha.txt
+            D:\aspnetcore-main-invariant.log
