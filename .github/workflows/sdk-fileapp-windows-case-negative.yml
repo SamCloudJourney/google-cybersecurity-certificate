@@ -1,0 +1,66 @@
+name: SDK file-app Windows case negative control
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/sdk-fileapp-windows-case-negative.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-negative:
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk:
+          - '10.0.401'
+          - '11.0.100-rc.1.26425.128'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    name: windows-case-negative-${{ matrix.sdk }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.sdk }}
+
+      - name: Prove case variants are not distinct filesystem identities
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'sdk-windows-case-negative'
+          Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue
+          $lowerDir = Join-Path $root 'victim'
+          $upperDir = Join-Path $root 'VICTIM'
+          New-Item -ItemType Directory -Force -Path $lowerDir | Out-Null
+
+          $lower = Join-Path $lowerDir 'Program.cs'
+          $upper = Join-Path $upperDir 'Program.cs'
+          Set-Content $lower 'Console.WriteLine("WINDOWS_SINGLE_IDENTITY");'
+
+          $lowerFull = [IO.Path]::GetFullPath($lower)
+          $upperFull = [IO.Path]::GetFullPath($upper)
+          $lowerExists = Test-Path $lower
+          $upperExists = Test-Path $upper
+
+          Write-Host "LOWER=$lowerFull"
+          Write-Host "UPPER=$upperFull"
+          Write-Host "LOWER_EXISTS=$lowerExists"
+          Write-Host "UPPER_EXISTS=$upperExists"
+
+          if (-not ($lowerExists -and $upperExists)) { throw 'Expected both case spellings to resolve.' }
+
+          $id1 = (Get-Item $lower).FullName
+          $id2 = (Get-Item $upper).FullName
+          Write-Host "RESOLVED_LOWER=$id1"
+          Write-Host "RESOLVED_UPPER=$id2"
+
+          $sameContent = (Get-Content $lower -Raw) -eq (Get-Content $upper -Raw)
+          Write-Host "SAME_CONTENT=$sameContent"
+
+          if (-not $sameContent) { throw 'Unexpected distinct Windows case identities.' }
+          Write-Host 'WINDOWS_CASE_NEGATIVE=CASE_VARIANTS_RESOLVE_TO_SAME_FILESYSTEM_OBJECT'
