@@ -1,0 +1,195 @@
+name: Current main nested Map integration evidence
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/current-main-nested-map-integration.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source-integration-windows:
+    runs-on: windows-latest
+    timeout-minutes: 50
+    steps:
+      - name: Clone current ASP.NET Core main
+        shell: pwsh
+        run: |
+          git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/dotnet/aspnetcore.git D:\aspnetcore-main-integration
+          Set-Location D:\aspnetcore-main-integration
+          git rev-parse HEAD | Tee-Object -FilePath D:\aspnetcore-main-integration-sha.txt
+
+      - name: Add current-main security integration observation
+        shell: pwsh
+        run: |
+          @'
+          using Microsoft.AspNetCore.Builder;
+          using Microsoft.AspNetCore.Hosting;
+          using Microsoft.AspNetCore.Http;
+          using Microsoft.AspNetCore.TestHost;
+          using Microsoft.Extensions.FileProviders;
+          using Microsoft.Extensions.Hosting;
+          using Xunit;
+
+          namespace Microsoft.AspNetCore.StaticFiles;
+
+          public class NestedMapBackslashSecurityIntegrationTest
+          {
+              [Fact]
+              public async Task CurrentMain_NestedMap_BackslashRemainder_SkipsGuard_AndOuterStaticFilesServesProtectedFile()
+              {
+                  Assert.True(OperatingSystem.IsWindows());
+
+                  var root = Path.Combine(Path.GetTempPath(), "nested-map-security-" + Guid.NewGuid().ToString("N"));
+                  var adminRoot = Path.Combine(root, "admin");
+                  Directory.CreateDirectory(adminRoot);
+                  var secretPath = Path.Combine(adminRoot, "secret.txt");
+                  var secret = "TOP_SECRET_CURRENT_MAIN";
+                  await File.WriteAllTextAsync(secretPath, secret);
+
+                  using var rootProvider = new PhysicalFileProvider(root);
+                  using var adminProvider = new PhysicalFileProvider(adminRoot);
+
+                  var guardHits = 0;
+                  var innerStaticHits = 0;
+                  var outerStaticHits = 0;
+
+                  try
+                  {
+                      using var host = new HostBuilder()
+                          .ConfigureWebHost(webHost =>
+                          {
+                              webHost.UseTestServer();
+                              webHost.Configure(app =>
+                              {
+                                  app.Map("/api", api =>
+                                  {
+                                      api.Map("/admin", admin =>
+                                      {
+                                          admin.Use(async (context, next) =>
+                                          {
+                                              guardHits++;
+                                              if (context.Request.Headers["X-Admin-Key"] != "research-only")
+                                              {
+                                                  context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                                                  await context.Response.WriteAsync("AUTH_REQUIRED");
+                                                  return;
+                                              }
+
+                                              await next();
+                                          });
+
+                                          admin.UseStaticFiles(new StaticFileOptions
+                                          {
+                                              FileProvider = adminProvider,
+                                              OnPrepareResponse = _ => innerStaticHits++,
+                                          });
+                                      });
+
+                                      api.UseStaticFiles(new StaticFileOptions
+                                      {
+                                          FileProvider = rootProvider,
+                                          OnPrepareResponse = _ => outerStaticHits++,
+                                      });
+                                  });
+                              });
+                          })
+                          .Build();
+
+                      await host.StartAsync();
+                      var server = host.GetTestServer();
+
+                      // Positive security control: ordinary protected spelling reaches the guard.
+                      var denied = await server.SendAsync(context =>
+                      {
+                          context.Request.Method = HttpMethods.Get;
+                          context.Request.Path = "/api/admin/secret.txt";
+                      });
+
+                      Assert.Equal(StatusCodes.Status401Unauthorized, denied.Response.StatusCode);
+                      Assert.Equal(1, guardHits);
+                      Assert.Equal(0, innerStaticHits);
+                      Assert.Equal(0, outerStaticHits);
+
+                      guardHits = innerStaticHits = outerStaticHits = 0;
+
+                      // Positive resource control: authenticated ordinary spelling serves the file
+                      // through the protected branch.
+                      var allowed = await server.SendAsync(context =>
+                      {
+                          context.Request.Method = HttpMethods.Get;
+                          context.Request.Path = "/api/admin/secret.txt";
+                          context.Request.Headers["X-Admin-Key"] = "research-only";
+                      });
+
+                      Assert.Equal(StatusCodes.Status200OK, allowed.Response.StatusCode);
+                      Assert.Equal(secret.Length, allowed.Response.ContentLength);
+                      Assert.Equal(1, guardHits);
+                      Assert.Equal(1, innerStaticHits);
+                      Assert.Equal(0, outerStaticHits);
+
+                      guardHits = innerStaticHits = outerStaticHits = 0;
+
+                      // Vulnerable decoded-path state produced by Kestrel for %5C.
+                      var bypass = await server.SendAsync(context =>
+                      {
+                          context.Request.Method = HttpMethods.Get;
+                          context.Request.Path = "/api\\admin\\secret.txt";
+                      });
+
+                      Assert.Equal(StatusCodes.Status200OK, bypass.Response.StatusCode);
+                      Assert.Equal(secret.Length, bypass.Response.ContentLength);
+                      Assert.Equal(0, guardHits);
+                      Assert.Equal(0, innerStaticHits);
+                      Assert.Equal(1, outerStaticHits);
+
+                      // Causal control: normalizing only the separators restores the same guard.
+                      guardHits = innerStaticHits = outerStaticHits = 0;
+                      var normalized = await server.SendAsync(context =>
+                      {
+                          context.Request.Method = HttpMethods.Get;
+                          context.Request.Path = "/api/admin/secret.txt";
+                      });
+
+                      Assert.Equal(StatusCodes.Status401Unauthorized, normalized.Response.StatusCode);
+                      Assert.Equal(1, guardHits);
+                      Assert.Equal(0, outerStaticHits);
+                  }
+                  finally
+                  {
+                      try { Directory.Delete(root, recursive: true); } catch { }
+                  }
+              }
+          }
+          '@ | Set-Content D:\aspnetcore-main-integration\src\Middleware\StaticFiles\test\UnitTests\NestedMapBackslashSecurityIntegrationTest.cs
+
+      - name: Restore current main
+        shell: pwsh
+        run: |
+          Set-Location D:\aspnetcore-main-integration
+          .\restore.cmd
+          . .\activate.ps1
+          dotnet --info
+
+      - name: Run current-main integration proof
+        shell: pwsh
+        run: |
+          Set-Location D:\aspnetcore-main-integration
+          . .\activate.ps1
+          dotnet test src\Middleware\StaticFiles\test\UnitTests\Microsoft.AspNetCore.StaticFiles.Tests.csproj `
+            --filter "FullyQualifiedName~NestedMapBackslashSecurityIntegrationTest" `
+            --logger "console;verbosity=normal" | Tee-Object -FilePath D:\current-main-nested-map-integration.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload source integration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: current-main-nested-map-integration
+          path: |
+            D:\aspnetcore-main-integration-sha.txt
+            D:\current-main-nested-map-integration.log
