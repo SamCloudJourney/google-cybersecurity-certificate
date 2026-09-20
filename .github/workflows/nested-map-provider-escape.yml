@@ -1,0 +1,38 @@
+name: Nested Map provider-root escape evidence
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - 'labs/nested-map-escape-evidence/**'
+      - '.github/workflows/nested-map-provider-escape.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-provider-escape:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 11.0.100-rc.1.26425.128
+
+      - name: Run provider-root escape matrix
+        shell: pwsh
+        run: |
+          ./labs/nested-map-escape-evidence/probe.ps1
+
+      - name: Upload escape evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nested-map-provider-escape-windows
+          path: |
+            labs/nested-map-escape-evidence/results.json
+            labs/nested-map-escape-evidence/server.log
+            labs/nested-map-escape-evidence/server.err
