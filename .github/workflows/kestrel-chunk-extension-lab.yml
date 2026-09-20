@@ -1006,3 +1006,169 @@ jobs:
         with:
           name: dataprotection-variant-fuzz-${{ matrix.os }}
           path: /tmp/dp-lab/dataprotection-results.log
+
+
+  nested-map-backslash-variant:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: net10-10.0.12
+            sdk: 10.0.401
+            tfm: net10.0
+          - label: net11-rc1
+            sdk: 11.0.100-rc.1.26425.128
+            tfm: net11.0
+    runs-on: ubuntu-latest
+    name: nested-map-backslash-${{ matrix.label }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.sdk }}
+
+      - name: Build nested Map authorization harness
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p /tmp/map-lab
+          cat >/tmp/map-lab/MapLab.csproj <<EOF
+          <Project Sdk="Microsoft.NET.Sdk.Web">
+            <PropertyGroup>
+              <TargetFramework>${{ matrix.tfm }}</TargetFramework>
+              <ImplicitUsings>enable</ImplicitUsings>
+              <Nullable>enable</Nullable>
+            </PropertyGroup>
+          </Project>
+          EOF
+
+          cat >/tmp/map-lab/Program.cs <<'EOF'
+          using Microsoft.AspNetCore.Http.Features;
+
+          var builder = WebApplication.CreateBuilder(args);
+          builder.WebHost.ConfigureKestrel(o => o.ListenLocalhost(5025));
+          var app = builder.Build();
+
+          app.Use(async (ctx, next) =>
+          {
+              Console.WriteLine($"TOP raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBase={ctx.Request.PathBase} path={ctx.Request.Path}");
+              await next();
+          });
+
+          app.Map("/api", api =>
+          {
+              api.Use(async (ctx, next) =>
+              {
+                  Console.WriteLine($"API raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBase={ctx.Request.PathBase} path={ctx.Request.Path}");
+                  await next();
+              });
+
+              api.Map("/admin", admin =>
+              {
+                  admin.Run(async ctx =>
+                  {
+                      Console.WriteLine($"PROTECTED_HIT raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBase={ctx.Request.PathBase} path={ctx.Request.Path}");
+                      ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                      await ctx.Response.WriteAsync($"PROTECTED pathBase={ctx.Request.PathBase} path={ctx.Request.Path}");
+                  });
+              });
+
+              api.Run(async ctx =>
+              {
+                  Console.WriteLine($"API_PUBLIC_HIT raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBase={ctx.Request.PathBase} path={ctx.Request.Path}");
+                  ctx.Response.StatusCode = StatusCodes.Status200OK;
+                  await ctx.Response.WriteAsync($"API_PUBLIC pathBase={ctx.Request.PathBase} path={ctx.Request.Path}");
+              });
+          });
+
+          app.Run(async ctx =>
+          {
+              Console.WriteLine($"ROOT_PUBLIC_HIT raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBase={ctx.Request.PathBase} path={ctx.Request.Path}");
+              ctx.Response.StatusCode = StatusCodes.Status200OK;
+              await ctx.Response.WriteAsync($"ROOT_PUBLIC pathBase={ctx.Request.PathBase} path={ctx.Request.Path}");
+          });
+
+          await app.RunAsync();
+          EOF
+
+          dotnet build /tmp/map-lab/MapLab.csproj -c Release
+
+      - name: Exercise encoded-backslash nesting and absolute-form normalization
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd /tmp/map-lab
+          dotnet run --no-build -c Release --project MapLab.csproj >server.log 2>&1 &
+          echo $! >server.pid
+          cleanup(){ kill "$(cat server.pid)" 2>/dev/null || true; }
+          trap cleanup EXIT
+
+          for i in {1..60}; do
+            if curl -sS --max-time 1 http://127.0.0.1:5025/ready >/dev/null 2>&1; then break; fi
+            sleep .2
+          done
+
+          cat >probe.py <<'PY'
+          import json, socket
+
+          cases = {
+              "normal_admin": "/api/admin",
+              "backslash_after_admin": "/api/admin%5Csecret",
+              "backslash_between_nested_maps": "/api%5Cadmin",
+              "backslash_between_nested_maps_with_tail": "/api%5Cadmin/secret",
+              "literal_encoded_slash_between_maps": "/api%2Fadmin",
+              "absolute_encoded_slash": "http://localhost:5025/api%2Fadmin",
+              "absolute_backslash_dot_segment": r"http://localhost:5025/public\..\api\admin",
+              "absolute_backslash_plain": r"http://localhost:5025/api\admin",
+          }
+
+          def send(target):
+              s=socket.create_connection(("127.0.0.1",5025),timeout=3)
+              s.settimeout(2)
+              req=(
+                  f"GET {target} HTTP/1.1\r\n"
+                  "Host: localhost:5025\r\n"
+                  "Connection: close\r\n"
+                  "\r\n"
+              ).encode("ascii")
+              s.sendall(req)
+              data=bytearray()
+              while True:
+                  try:
+                      p=s.recv(65536)
+                      if not p: break
+                      data.extend(p)
+                  except socket.timeout:
+                      break
+              s.close()
+              raw=bytes(data)
+              head,_,body=raw.partition(b"\r\n\r\n")
+              status=head.split(b"\r\n",1)[0].decode("latin1","replace") if head else ""
+              return {"status":status,"body":body.decode("latin1","replace"),"raw":raw[:1600].decode("latin1","replace")}
+
+          results={}
+          for name,target in cases.items():
+              try:
+                  results[name]={"target":target,**send(target)}
+              except Exception as e:
+                  results[name]={"target":target,"error":repr(e)}
+
+          print(json.dumps(results,indent=2,sort_keys=True))
+          open("results.json","w").write(json.dumps(results,indent=2,sort_keys=True))
+          PY
+
+          python3 probe.py | tee probe.out
+          sleep .5
+          echo "=== SERVER LOG ==="
+          cat server.log
+
+      - name: Upload nested Map results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nested-map-backslash-${{ matrix.label }}
+          path: |
+            /tmp/map-lab/results.json
+            /tmp/map-lab/probe.out
+            /tmp/map-lab/server.log
