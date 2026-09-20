@@ -1,0 +1,206 @@
+name: Current main SDK file-app cache collision source proof
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/current-main-sdk-fileapp-cache-collision.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  current-main-source-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Clone current dotnet/sdk main
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="$RUNNER_TEMP/dotnet-sdk-current-main"
+          git clone --depth 1 https://github.com/dotnet/sdk.git "$ROOT"
+          cd "$ROOT"
+          git rev-parse HEAD | tee "$GITHUB_WORKSPACE/dotnet-sdk-main-sha.txt"
+          echo "SDK_ROOT=$ROOT" >> "$GITHUB_ENV"
+
+      - name: Add focused source-level cache collision regression
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat > "$SDK_ROOT/test/dotnet-aot.Tests/CurrentMainCaseCollisionSecurityTests.cs" <<'CS'
+          // Licensed to the .NET Foundation under one or more agreements.
+          // The .NET Foundation licenses this file to you under the MIT license.
+
+          using System.Text.Json;
+          using Microsoft.DotNet.Cli.Commands.Run;
+          using Microsoft.DotNet.FileBasedPrograms;
+          using Microsoft.DotNet.Utilities;
+
+          namespace Microsoft.DotNet.Cli.Tests;
+
+          [TestClass]
+          public sealed class CurrentMainCaseCollisionSecurityTests
+          {
+              [TestMethod]
+              public void LinuxCaseSensitivePathsCollideAndVictimAcceptsAttackerRunProperties()
+              {
+                  if (!OperatingSystem.IsLinux())
+                  {
+                      Assert.Inconclusive("This regression targets case-sensitive Linux path semantics.");
+                  }
+
+                  string root = Path.Join(Path.GetTempPath(), "sdk-current-main-cache-collision-" + Guid.NewGuid().ToString("N"));
+                  string attackerDirectory = Path.Join(root, "victim");
+                  string victimDirectory = Path.Join(root, "VICTIM");
+                  string controlDirectory = Path.Join(root, "unrelated");
+                  string attackerPath = Path.Join(attackerDirectory, "Program.cs");
+                  string victimPath = Path.Join(victimDirectory, "Program.cs");
+                  string controlPath = Path.Join(controlDirectory, "Program.cs");
+
+                  try
+                  {
+                      Directory.CreateDirectory(attackerDirectory);
+                      Directory.CreateDirectory(victimDirectory);
+                      Directory.CreateDirectory(controlDirectory);
+                      File.WriteAllText(attackerPath, "Console.WriteLine(\"ATTACKER\");");
+                      File.WriteAllText(victimPath, "Console.WriteLine(\"VICTIM\");");
+                      File.WriteAllText(controlPath, "Console.WriteLine(\"CONTROL\");");
+
+                      Assert.AreNotEqual(attackerPath, victimPath);
+                      Assert.IsTrue(File.Exists(attackerPath));
+                      Assert.IsTrue(File.Exists(victimPath));
+
+                      string attackerRawHash = Sha256Hasher.Hash(attackerPath);
+                      string victimRawHash = Sha256Hasher.Hash(victimPath);
+                      Assert.AreNotEqual(attackerRawHash, victimRawHash, "Raw path hashes must be distinct.");
+
+                      string attackerNormalizedHash = Sha256Hasher.HashWithNormalizedCasing(attackerPath);
+                      string victimNormalizedHash = Sha256Hasher.HashWithNormalizedCasing(victimPath);
+                      Assert.AreEqual(attackerNormalizedHash, victimNormalizedHash,
+                          "Case-normalized hashing incorrectly merges distinct Linux paths.");
+
+                      string attackerArtifacts = VirtualProjectBuilder.GetArtifactsPath(attackerPath);
+                      string victimArtifacts = VirtualProjectBuilder.GetArtifactsPath(victimPath);
+                      string controlArtifacts = VirtualProjectBuilder.GetArtifactsPath(controlPath);
+
+                      Assert.AreEqual(attackerArtifacts, victimArtifacts,
+                          "Distinct case-sensitive entry points should not share an artifacts cache.");
+                      Assert.AreNotEqual(attackerArtifacts, controlArtifacts);
+
+                      Directory.CreateDirectory(attackerArtifacts);
+
+                      var globalProperties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                      {
+                          ["NuGetInteractive"] = "false",
+                      };
+
+                      string marker = Path.Join(root, "attacker-marker");
+                      var attackerCache = new RunFileBuildCacheEntry(
+                          new Dictionary<string, string>(globalProperties, StringComparer.OrdinalIgnoreCase))
+                      {
+                          Directives =
+                          [
+                              "#:property RunCommand=/usr/bin/touch",
+                              $"#:property RunArguments={marker}",
+                          ],
+                          BuildLevel = BuildLevel.All,
+                          SdkVersion = "current-main-security-test",
+                          RuntimeVersion = "current-main-runtime-test",
+                          Run = new RunProperties(
+                              "/usr/bin/touch",
+                              marker,
+                              root,
+                              RuntimeIdentifier: string.Empty,
+                              DefaultAppHostRuntimeIdentifier: string.Empty,
+                              TargetFrameworkVersion: "v11.0"),
+                      };
+
+                      string startCache = Path.Join(attackerArtifacts, FileBasedAppRunPlan.BuildStartCacheFileName);
+                      string successCache = Path.Join(attackerArtifacts, FileBasedAppRunPlan.BuildSuccessCacheFileName);
+
+                      File.WriteAllText(startCache, attackerPath);
+                      using (FileStream stream = File.Create(successCache))
+                      {
+                          JsonSerializer.Serialize(
+                              stream,
+                              attackerCache,
+                              RunFileBuildCacheJsonSerializerContext.Default.RunFileBuildCacheEntry);
+                      }
+
+                      DateTime buildTimeUtc = DateTime.UtcNow.AddSeconds(-2);
+                      File.SetLastWriteTimeUtc(attackerPath, buildTimeUtc.AddSeconds(-2));
+                      File.SetLastWriteTimeUtc(victimPath, buildTimeUtc.AddSeconds(-2));
+                      File.SetLastWriteTimeUtc(controlPath, buildTimeUtc.AddSeconds(-2));
+                      File.SetLastWriteTimeUtc(startCache, buildTimeUtc.AddSeconds(-1));
+                      File.SetLastWriteTimeUtc(successCache, buildTimeUtc);
+
+                      RunPlan victimPlan = FileBasedAppRunPlan.AnalyzeCachedLaunch(
+                          victimPath,
+                          victimArtifacts,
+                          new Dictionary<string, string>(globalProperties, StringComparer.OrdinalIgnoreCase),
+                          attackerCache.SdkVersion!,
+                          attackerCache.RuntimeVersion!);
+
+                      Assert.AreEqual(RunTier.CachedLaunch, victimPlan.Tier);
+                      Assert.AreEqual(RunDecisionReason.CacheValid, victimPlan.Reason);
+                      Assert.IsNotNull(victimPlan.Launch);
+                      Assert.AreEqual("/usr/bin/touch", victimPlan.Launch.Command);
+                      Assert.AreEqual(marker, victimPlan.Launch.RunProperties?.Arguments);
+                      Assert.AreEqual(attackerCache.Directives, victimPlan.Cache?.PreviousEntry?.Directives);
+
+                      RunPlan controlPlan = FileBasedAppRunPlan.AnalyzeCachedLaunch(
+                          controlPath,
+                          controlArtifacts,
+                          new Dictionary<string, string>(globalProperties, StringComparer.OrdinalIgnoreCase),
+                          attackerCache.SdkVersion!,
+                          attackerCache.RuntimeVersion!);
+
+                      Assert.AreEqual(RunTier.ManagedFallback, controlPlan.Tier);
+
+                      Console.WriteLine("CURRENT_MAIN_CASE_COLLISION=CONFIRMED");
+                      Console.WriteLine($"ATTACKER_PATH={attackerPath}");
+                      Console.WriteLine($"VICTIM_PATH={victimPath}");
+                      Console.WriteLine($"RAW_HASH_DIFFERENT={attackerRawHash != victimRawHash}");
+                      Console.WriteLine($"NORMALIZED_HASH_EQUAL={attackerNormalizedHash == victimNormalizedHash}");
+                      Console.WriteLine($"ARTIFACTS_EQUAL={attackerArtifacts == victimArtifacts}");
+                      Console.WriteLine($"VICTIM_PLAN={victimPlan.Tier}");
+                      Console.WriteLine($"VICTIM_LAUNCH_COMMAND={victimPlan.Launch.Command}");
+                      Console.WriteLine($"CONTROL_PLAN={controlPlan.Tier}");
+                  }
+                  finally
+                  {
+                      if (Directory.Exists(root))
+                      {
+                          Directory.Delete(root, recursive: true);
+                      }
+                  }
+              }
+          }
+          CS
+
+      - name: Build current-main targeted test project
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$SDK_ROOT"
+          ./build.sh -projects test/dotnet-aot.Tests/dotnet-aot.Tests.csproj -c Debug 2>&1 | tee "$GITHUB_WORKSPACE/current-main-build.log"
+
+      - name: Run focused current-main regression
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$SDK_ROOT"
+          ./.dotnet/dotnet test test/dotnet-aot.Tests/dotnet-aot.Tests.csproj             -c Debug             --no-build             --filter "FullyQualifiedName~CurrentMainCaseCollisionSecurityTests"             --logger "console;verbosity=normal" 2>&1 | tee "$GITHUB_WORKSPACE/current-main-test.log"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: current-main-sdk-fileapp-cache-collision
+          path: |
+            dotnet-sdk-main-sha.txt
+            current-main-build.log
+            current-main-test.log
