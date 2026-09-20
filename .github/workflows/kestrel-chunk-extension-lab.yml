@@ -1243,7 +1243,7 @@ jobs:
 
                   admin.UseStaticFiles(new StaticFileOptions
                   {
-                      FileProvider = new PhysicalFileProvider(contentRoot),
+                      FileProvider = new PhysicalFileProvider(Path.Combine(contentRoot, "admin")),
                       ServeUnknownFileTypes = false
                   });
 
