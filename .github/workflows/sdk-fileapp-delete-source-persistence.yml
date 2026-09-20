@@ -1,0 +1,83 @@
+name: SDK file-app cache persists after attacker source deletion
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/sdk-fileapp-delete-source-persistence.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  delete-source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 11.0.100-rc.1.26425.128
+
+      - name: Build only, delete attacker source, then run victim
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="$RUNNER_TEMP/sdk-fileapp-delete-source"
+          A="$ROOT/victim/Program.cs"
+          V="$ROOT/VICTIM/Program.cs"
+          MARKER="$RUNNER_TEMP/SDK_DELETE_SOURCE_ATTACKER.marker"
+          rm -rf "$ROOT"; rm -f "$MARKER"
+          mkdir -p "$(dirname "$A")" "$(dirname "$V")"
+
+          cat > "$A" <<EOF
+          using System.IO;
+          File.WriteAllText(@"$MARKER","ATTACKER");
+          Console.WriteLine("DELETED_SOURCE_ATTACKER_EXECUTED");
+          EOF
+          cat > "$V" <<'EOF'
+          Console.WriteLine("DELETED_SOURCE_TRUSTED_VICTIM_EXECUTED");
+          EOF
+          touch -d '2020-01-01T00:00:00Z' "$A" "$V"
+
+          dotnet build "$A" > "$ROOT/build.out" 2> "$ROOT/build.err"
+          test ! -f "$MARKER"
+          rm -f "$A"
+          rmdir "$(dirname "$A")"
+          test ! -e "$A"
+          echo "ATTACKER_SOURCE_DELETED=true"
+
+          dotnet run --file "$V" > "$ROOT/victim.out" 2> "$ROOT/victim.err"
+          cat "$ROOT/victim.out"; cat "$ROOT/victim.err"
+
+          if grep -q 'DELETED_SOURCE_ATTACKER_EXECUTED' "$ROOT/victim.out" && test -f "$MARKER"; then
+            echo "DELETE_SOURCE_RESULT=ATTACKER_OUTPUT_PERSISTS_AND_EXECUTES"
+          else
+            echo "DELETE_SOURCE_RESULT=NOT_REPRODUCED"
+            exit 1
+          fi
+
+          rm -f "$MARKER"
+          dotnet run --file "$V" --no-cache > "$ROOT/nocache.out" 2> "$ROOT/nocache.err"
+          cat "$ROOT/nocache.out"; cat "$ROOT/nocache.err"
+
+          if grep -q 'DELETED_SOURCE_TRUSTED_VICTIM_EXECUTED' "$ROOT/nocache.out" && ! test -f "$MARKER"; then
+            echo "DELETE_SOURCE_NO_CACHE_CONTROL=TRUSTED_VICTIM_EXECUTED"
+          else
+            echo "DELETE_SOURCE_NO_CACHE_CONTROL=FAILED"
+            exit 1
+          fi
+
+          cp "$ROOT/"*.out "$GITHUB_WORKSPACE/" || true
+          cp "$ROOT/"*.err "$GITHUB_WORKSPACE/" || true
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-fileapp-delete-source-persistence
+          path: |
+            *.out
+            *.err
