@@ -1,0 +1,110 @@
+name: SDK file-app Unicode casefold collision
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/sdk-fileapp-unicode-casefold-collision.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  unicode-casefold:
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk:
+          - '10.0.401'
+          - '11.0.100-rc.1.26425.128'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    name: unicode-casefold-${{ matrix.sdk }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.sdk }}
+
+      - name: Test distinct Unicode paths that uppercase to same invariant identity
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$RUNNER_TEMP/sdk-unicode-casefold"
+          # U+017F LATIN SMALL LETTER LONG S uppercases to ASCII S under Unicode invariant casing.
+          ATTACKER_DIR="$ROOT/ſervice"
+          VICTIM_DIR="$ROOT/service"
+          A="$ATTACKER_DIR/Program.cs"
+          V="$VICTIM_DIR/Program.cs"
+          MARKER="$RUNNER_TEMP/SDK_UNICODE_CASEFOLD.marker"
+
+          rm -rf "$ROOT"
+          rm -f "$MARKER"
+          mkdir -p "$ATTACKER_DIR" "$VICTIM_DIR"
+
+          cat > "$A" <<EOF
+          using System.IO;
+          File.WriteAllText(@"$MARKER","UNICODE_ATTACKER");
+          Console.WriteLine("UNICODE_CASEFOLD_ATTACKER_EXECUTED");
+          EOF
+
+          cat > "$V" <<'EOF'
+          Console.WriteLine("UNICODE_CASEFOLD_TRUSTED_VICTIM_EXECUTED");
+          EOF
+
+          python3 - "$A" "$V" <<'PY'
+          import sys
+          a,v=sys.argv[1:]
+          print("ATTACKER_PATH="+a)
+          print("VICTIM_PATH="+v)
+          print("PATHS_DISTINCT="+str(a!=v))
+          print("PYTHON_UPPER_EQUAL="+str(a.upper()==v.upper()))
+          PY
+
+          dotnet build "$A" > "$ROOT/build.out" 2> "$ROOT/build.err"
+          cat "$ROOT/build.out"; cat "$ROOT/build.err"
+          test ! -f "$MARKER"
+          echo "UNICODE_BUILD_ONLY_PRECONDITION=PASS"
+
+          dotnet run --file "$V" > "$ROOT/victim.out" 2> "$ROOT/victim.err"
+          cat "$ROOT/victim.out"; cat "$ROOT/victim.err"
+
+          if grep -q 'UNICODE_CASEFOLD_ATTACKER_EXECUTED' "$ROOT/victim.out" && test -f "$MARKER"; then
+            echo "UNICODE_CASEFOLD_RESULT=AFFECTED"
+          elif grep -q 'UNICODE_CASEFOLD_TRUSTED_VICTIM_EXECUTED' "$ROOT/victim.out"; then
+            echo "UNICODE_CASEFOLD_RESULT=NOT_COLLIDING_IN_DOTNET"
+          else
+            echo "UNICODE_CASEFOLD_RESULT=UNKNOWN"
+            exit 1
+          fi
+
+          rm -f "$MARKER"
+          dotnet run --file "$V" --no-cache > "$ROOT/control.out" 2> "$ROOT/control.err"
+          cat "$ROOT/control.out"; cat "$ROOT/control.err"
+
+          if grep -q 'UNICODE_CASEFOLD_TRUSTED_VICTIM_EXECUTED' "$ROOT/control.out" && ! test -f "$MARKER"; then
+            echo "UNICODE_CASEFOLD_NO_CACHE_CONTROL=TRUSTED_VICTIM_EXECUTED"
+          else
+            echo "UNICODE_CASEFOLD_NO_CACHE_CONTROL=FAILED"
+            exit 1
+          fi
+
+          cp "$ROOT/build.out" "$GITHUB_WORKSPACE/unicode-build-${{ matrix.sdk }}.out"
+          cp "$ROOT/build.err" "$GITHUB_WORKSPACE/unicode-build-${{ matrix.sdk }}.err"
+          cp "$ROOT/victim.out" "$GITHUB_WORKSPACE/unicode-victim-${{ matrix.sdk }}.out"
+          cp "$ROOT/victim.err" "$GITHUB_WORKSPACE/unicode-victim-${{ matrix.sdk }}.err"
+          cp "$ROOT/control.out" "$GITHUB_WORKSPACE/unicode-control-${{ matrix.sdk }}.out"
+          cp "$ROOT/control.err" "$GITHUB_WORKSPACE/unicode-control-${{ matrix.sdk }}.err"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unicode-casefold-collision-${{ matrix.sdk }}
+          path: |
+            unicode-*.out
+            unicode-*.err
