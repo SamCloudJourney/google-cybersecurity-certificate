@@ -61,7 +61,6 @@ jobs:
           Console.WriteLine("ATTACKER_SOURCE_BODY_SHOULD_NEVER_EXECUTE");
           EOF
           git rm src/VICTIM/Program.cs
-          rmdir src/VICTIM
           git add .
           git commit -m "attacker case-variant path"
 
