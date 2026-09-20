@@ -518,13 +518,13 @@ jobs:
           http:
             routers:
               blocked:
-                rule: "Path(\`/smuggled\`)"
+                rule: 'Path(`/smuggled`)'
                 entryPoints: [web]
                 priority: 100
                 middlewares: [denyall]
                 service: origin
               normal:
-                rule: "PathPrefix(\`/\`)"
+                rule: 'PathPrefix(`/`)'
                 entryPoints: [web]
                 priority: 1
                 service: origin
@@ -540,6 +540,53 @@ jobs:
                     - url: "http://127.0.0.1:5005"
           EOF
 
+          cat >/tmp/envoy-lab.yml <<'EOF'
+          static_resources:
+            listeners:
+              - name: listener_0
+                address:
+                  socket_address:
+                    address: 0.0.0.0
+                    port_value: 5013
+                filter_chains:
+                  - filters:
+                      - name: envoy.filters.network.http_connection_manager
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                          stat_prefix: ingress_http
+                          route_config:
+                            name: local_route
+                            virtual_hosts:
+                              - name: local_service
+                                domains: ["*"]
+                                routes:
+                                  - match:
+                                      path: "/smuggled"
+                                    direct_response:
+                                      status: 403
+                                  - match:
+                                      prefix: "/"
+                                    route:
+                                      cluster: origin
+                          http_filters:
+                            - name: envoy.filters.http.router
+                              typed_config:
+                                "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+            clusters:
+              - name: origin
+                connect_timeout: 1s
+                type: STATIC
+                load_assignment:
+                  cluster_name: origin
+                  endpoints:
+                    - lb_endpoints:
+                        - endpoint:
+                            address:
+                              socket_address:
+                                address: 127.0.0.1
+                                port_value: 5005
+          EOF
+
       - name: Run frontend differential matrix
         shell: bash
         run: |
@@ -550,19 +597,24 @@ jobs:
 
           sudo /usr/sbin/apache2 -f /tmp/apache-lab.conf -DFOREGROUND >/tmp/apache-stdout.log 2>&1 &
           echo $! > apache.pid
-          sudo varnishd -a 127.0.0.1:5009 -f /tmp/varnish-lab.vcl -s malloc,64m -F >/tmp/varnish.log 2>&1 &
+          sudo pkill varnishd 2>/dev/null || true
+          sudo rm -rf /tmp/varnish-lab-instance
+          sudo mkdir -p /tmp/varnish-lab-instance
+          sudo varnishd -n /tmp/varnish-lab-instance -a 127.0.0.1:5009 -f /tmp/varnish-lab.vcl -s malloc,64m -F >/tmp/varnish.log 2>&1 &
           echo $! > varnish.pid
+          sudo squid -z -f /tmp/squid-lab.conf >/tmp/squid-init.log 2>&1 || true
           sudo squid -N -f /tmp/squid-lab.conf >/tmp/squid-stdout.log 2>&1 &
           echo $! > squid.pid
           docker run --rm --network host --name caddy-lab -v /tmp/Caddyfile:/etc/caddy/Caddyfile:ro caddy:2 >/tmp/caddy.log 2>&1 &
           docker run --rm --network host --name traefik-lab -v /tmp/traefik-static.yml:/etc/traefik/traefik.yml:ro -v /tmp/traefik-dynamic.yml:/etc/traefik/dynamic.yml:ro traefik:v3 >/tmp/traefik.log 2>&1 &
+          docker run --rm --network host --name envoy-lab -v /tmp/envoy-lab.yml:/etc/envoy/envoy.yaml:ro envoyproxy/envoy:v1.39.1 -c /etc/envoy/envoy.yaml >/tmp/envoy.log 2>&1 &
 
           cleanup() {
             kill "$(cat origin.pid)" 2>/dev/null || true
             sudo kill "$(cat apache.pid)" 2>/dev/null || true
             sudo kill "$(cat varnish.pid)" 2>/dev/null || true
             sudo kill "$(cat squid.pid)" 2>/dev/null || true
-            docker rm -f caddy-lab traefik-lab >/dev/null 2>&1 || true
+            docker rm -f caddy-lab traefik-lab envoy-lab >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
 
@@ -570,7 +622,7 @@ jobs:
           import socket,time
           for _ in range(120):
               ok=True
-              for p in [5005,5008,5009,5010,5011,5012]:
+              for p in [5005,5008,5009,5010,5011,5012,5013]:
                   try:
                       s=socket.create_connection(("127.0.0.1",p),timeout=.2);s.close()
                   except Exception:
@@ -589,6 +641,7 @@ jobs:
               ("squid",5010),
               ("caddy",5011),
               ("traefik",5012),
+              ("envoy",5013),
           ]
 
           def payload(label, malformed=True):
@@ -662,6 +715,8 @@ jobs:
           tail -100 /tmp/caddy.log || true
           echo "=== TRAEFIK ==="
           tail -100 /tmp/traefik.log || true
+          echo "=== ENVOY ==="
+          tail -100 /tmp/envoy.log || true
 
       - name: Upload frontend matrix
         if: always()
@@ -674,6 +729,6 @@ jobs:
             /tmp/frontends-lab/origin.log
             /tmp/apache-error.log
             /tmp/varnish.log
-            /tmp/squid-cache.log
             /tmp/caddy.log
             /tmp/traefik.log
+            /tmp/envoy.log
