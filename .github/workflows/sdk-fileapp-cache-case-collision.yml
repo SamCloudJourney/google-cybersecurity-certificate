@@ -135,6 +135,36 @@ jobs:
             echo 'NEWER_SOURCE_CONTROL=UNEXPECTED'
           fi
 
+          echo "=== Hard causal control: disable SDK file-app cache ==="
+          rm -f "$MARKER"
+          set +e
+          dotnet run --file "$UPPER" --no-cache > "$ROOT/nocache.stdout" 2> "$ROOT/nocache.stderr"
+          NOCACHE_RC=$?
+          set -e
+          cat "$ROOT/nocache.stdout"
+          cat "$ROOT/nocache.stderr"
+          echo "NOCACHE_RC=$NOCACHE_RC"
+          test "$NOCACHE_RC" -eq 0
+
+          if grep -q 'TRUSTED_VICTIM_EXECUTED' "$ROOT/nocache.stdout" && ! test -f "$MARKER"; then
+            echo 'NO_CACHE_CONTROL=TRUSTED_VICTIM_EXECUTED'
+          else
+            echo 'NO_CACHE_CONTROL=FAILED'
+            exit 1
+          fi
+
+          echo "=== Post-control normal run: new victim cache should remain clean ==="
+          rm -f "$MARKER"
+          dotnet run --file "$UPPER" > "$ROOT/post.stdout" 2> "$ROOT/post.stderr"
+          cat "$ROOT/post.stdout"
+          cat "$ROOT/post.stderr"
+          if grep -q 'TRUSTED_VICTIM_EXECUTED' "$ROOT/post.stdout" && ! test -f "$MARKER"; then
+            echo 'POST_CONTROL_NORMAL=TRUSTED_VICTIM_EXECUTED'
+          else
+            echo 'POST_CONTROL_NORMAL=FAILED'
+            exit 1
+          fi
+
           {
             echo "=== FIRST ==="
             cat "$ROOT/first.stdout" "$ROOT/first.stderr"
@@ -142,6 +172,10 @@ jobs:
             cat "$ROOT/second.stdout" "$ROOT/second.stderr"
             echo "=== CONTROL ==="
             cat "$ROOT/control.stdout" "$ROOT/control.stderr"
+            echo "=== NO-CACHE CONTROL ==="
+            cat "$ROOT/nocache.stdout" "$ROOT/nocache.stderr"
+            echo "=== POST-CONTROL NORMAL ==="
+            cat "$ROOT/post.stdout" "$ROOT/post.stderr"
             echo "=== MARKER AFTER CONTROL ==="
             test -f "$MARKER" && echo present || echo absent
           } > "$ROOT/summary.txt"
@@ -152,6 +186,10 @@ jobs:
           cp "$ROOT/second.stderr" "$GITHUB_WORKSPACE/sdk-cache-second.stderr"
           cp "$ROOT/control.stdout" "$GITHUB_WORKSPACE/sdk-cache-control.stdout"
           cp "$ROOT/control.stderr" "$GITHUB_WORKSPACE/sdk-cache-control.stderr"
+          cp "$ROOT/nocache.stdout" "$GITHUB_WORKSPACE/sdk-cache-nocache.stdout"
+          cp "$ROOT/nocache.stderr" "$GITHUB_WORKSPACE/sdk-cache-nocache.stderr"
+          cp "$ROOT/post.stdout" "$GITHUB_WORKSPACE/sdk-cache-post.stdout"
+          cp "$ROOT/post.stderr" "$GITHUB_WORKSPACE/sdk-cache-post.stderr"
           cp "$ROOT/summary.txt" "$GITHUB_WORKSPACE/sdk-cache-summary.txt"
 
       - name: Upload evidence
@@ -166,4 +204,8 @@ jobs:
             sdk-cache-second.stderr
             sdk-cache-control.stdout
             sdk-cache-control.stderr
+            sdk-cache-nocache.stdout
+            sdk-cache-nocache.stderr
+            sdk-cache-post.stdout
+            sdk-cache-post.stderr
             sdk-cache-summary.txt
