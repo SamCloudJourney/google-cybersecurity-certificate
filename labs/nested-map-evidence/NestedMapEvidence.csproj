@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <PropertyGroup>
-    <TargetFramework>$(EvidenceTfm)</TargetFramework>
     <EvidenceTfm Condition="'$(EvidenceTfm)' == ''">net11.0</EvidenceTfm>
+    <TargetFramework>$(EvidenceTfm)</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
