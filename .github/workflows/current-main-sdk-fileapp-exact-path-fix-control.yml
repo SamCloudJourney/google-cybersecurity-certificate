@@ -1,0 +1,219 @@
+name: Current main SDK exact-path cache-key fix control
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/current-main-sdk-fileapp-exact-path-fix-control.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exact-path-fix-control:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Clone current dotnet/sdk main
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="$RUNNER_TEMP/dotnet-sdk-fix-control"
+          git clone --depth 1 https://github.com/dotnet/sdk.git "$ROOT"
+          cd "$ROOT"
+          git rev-parse HEAD | tee "$GITHUB_WORKSPACE/fix-control-main-sha.txt"
+          echo "SDK_ROOT=$ROOT" >> "$GITHUB_ENV"
+
+      - name: Apply one-line exact-path cache-key control
+        shell: bash
+        run: |
+          set -euxo pipefail
+          FILE="$SDK_ROOT/src/Cli/Microsoft.DotNet.FileBasedPrograms/VirtualProjectBuilder.cs"
+          python3 - "$FILE" <<'PY'
+          import pathlib, sys
+          p = pathlib.Path(sys.argv[1])
+          s = p.read_text()
+          old = "string hash = Sha256Hasher.HashWithNormalizedCasing(entryPointFileFullPath);"
+          new = "string hash = Sha256Hasher.Hash(entryPointFileFullPath);"
+          if s.count(old) != 1:
+              raise SystemExit(f"expected exactly one vulnerable cache-key line, found {s.count(old)}")
+          p.write_text(s.replace(old, new))
+          PY
+          git -C "$SDK_ROOT" diff -- src/Cli/Microsoft.DotNet.FileBasedPrograms/VirtualProjectBuilder.cs | tee "$GITHUB_WORKSPACE/fix-control.patch"
+
+      - name: Add focused causal-control regression
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat > "$SDK_ROOT/test/dotnet-aot.Tests/ExactPathCacheKeyFixControlTests.cs" <<'CS'
+          // Licensed to the .NET Foundation under one or more agreements.
+          // The .NET Foundation licenses this file to you under the MIT license.
+
+          using System.Text.Json;
+          using Microsoft.DotNet.Cli.Commands.Run;
+          using Microsoft.DotNet.FileBasedPrograms;
+
+          namespace Microsoft.DotNet.Cli.Tests;
+
+          [TestClass]
+          public sealed class ExactPathCacheKeyFixControlTests
+          {
+              [TestMethod]
+              public void ExactPathHashSeparatesLinuxCaseVariantsAndRejectsAttackerCache()
+              {
+                  string root = Path.Join(
+                      Path.GetTempPath(),
+                      "sdk-exact-path-fix-control-" + Guid.NewGuid().ToString("N"));
+                  string attackerDirectory = Path.Join(root, "victim");
+                  string victimDirectory = Path.Join(root, "VICTIM");
+                  string attackerPath = Path.Join(attackerDirectory, "Program.cs");
+                  string victimPath = Path.Join(victimDirectory, "Program.cs");
+
+                  try
+                  {
+                      Directory.CreateDirectory(attackerDirectory);
+                      Directory.CreateDirectory(victimDirectory);
+                      File.WriteAllText(attackerPath, "Console.WriteLine(\"ATTACKER\");");
+                      File.WriteAllText(victimPath, "Console.WriteLine(\"VICTIM\");");
+
+                      string attackerArtifacts = VirtualProjectBuilder.GetArtifactsPath(attackerPath);
+                      string victimArtifacts = VirtualProjectBuilder.GetArtifactsPath(victimPath);
+
+                      Assert.AreNotEqual(
+                          attackerArtifacts,
+                          victimArtifacts,
+                          "Exact-path hashing must keep distinct Linux paths in distinct caches.");
+
+                      var globalProperties = new Dictionary<string, string>(
+                          StringComparer.OrdinalIgnoreCase)
+                      {
+                          ["NuGetInteractive"] = "false",
+                      };
+
+                      Directory.CreateDirectory(attackerArtifacts);
+                      string marker = Path.Join(root, "attacker-marker");
+
+                      var attackerCache = new RunFileBuildCacheEntry(
+                          new Dictionary<string, string>(
+                              globalProperties,
+                              StringComparer.OrdinalIgnoreCase))
+                      {
+                          BuildLevel = BuildLevel.All,
+                          SdkVersion = "current-main-fix-control",
+                          RuntimeVersion = "current-main-runtime-control",
+                          Run = new RunProperties(
+                              "/usr/bin/touch",
+                              marker,
+                              root,
+                              RuntimeIdentifier: string.Empty,
+                              DefaultAppHostRuntimeIdentifier: string.Empty,
+                              TargetFrameworkVersion: "v11.0"),
+                      };
+
+                      string startCache = Path.Join(
+                          attackerArtifacts,
+                          FileBasedAppRunPlan.BuildStartCacheFileName);
+                      string successCache = Path.Join(
+                          attackerArtifacts,
+                          FileBasedAppRunPlan.BuildSuccessCacheFileName);
+
+                      File.WriteAllText(startCache, attackerPath);
+                      using (FileStream stream = File.Create(successCache))
+                      {
+                          JsonSerializer.Serialize(
+                              stream,
+                              attackerCache,
+                              RunFileBuildCacheJsonSerializerContext.Default.RunFileBuildCacheEntry);
+                      }
+
+                      DateTime buildTimeUtc = DateTime.UtcNow.AddSeconds(-2);
+                      File.SetLastWriteTimeUtc(attackerPath, buildTimeUtc.AddSeconds(-2));
+                      File.SetLastWriteTimeUtc(victimPath, buildTimeUtc.AddSeconds(-2));
+                      File.SetLastWriteTimeUtc(startCache, buildTimeUtc.AddSeconds(-1));
+                      File.SetLastWriteTimeUtc(successCache, buildTimeUtc);
+
+                      Assert.IsFalse(
+                          File.Exists(Path.Join(
+                              victimArtifacts,
+                              FileBasedAppRunPlan.BuildSuccessCacheFileName)));
+
+                      RunPlan victimPlan = FileBasedAppRunPlan.AnalyzeCachedLaunch(
+                          victimPath,
+                          victimArtifacts,
+                          new Dictionary<string, string>(
+                              globalProperties,
+                              StringComparer.OrdinalIgnoreCase),
+                          attackerCache.SdkVersion!,
+                          attackerCache.RuntimeVersion!);
+
+                      Assert.AreEqual(RunTier.ManagedFallback, victimPlan.Tier);
+                      Assert.IsNull(victimPlan.Launch);
+
+                      string? proofPath = Environment.GetEnvironmentVariable("FIX_CONTROL_PROOF");
+                      if (!string.IsNullOrEmpty(proofPath))
+                      {
+                          File.WriteAllText(
+                              proofPath,
+                              $"EXACT_PATH_HASH_FIX_CONTROL=PASS{Environment.NewLine}" +
+                              $"ARTIFACTS_DIFFERENT={attackerArtifacts != victimArtifacts}{Environment.NewLine}" +
+                              $"ATTACKER_CACHE_EXISTS={File.Exists(successCache)}{Environment.NewLine}" +
+                              $"VICTIM_CACHE_EXISTS={File.Exists(Path.Join(victimArtifacts, FileBasedAppRunPlan.BuildSuccessCacheFileName))}{Environment.NewLine}" +
+                              $"VICTIM_PLAN={victimPlan.Tier}{Environment.NewLine}");
+                      }
+                  }
+                  finally
+                  {
+                      if (Directory.Exists(root))
+                      {
+                          Directory.Delete(root, recursive: true);
+                      }
+                  }
+              }
+          }
+          CS
+
+      - name: Build patched current-main targeted tests
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$SDK_ROOT"
+          ./build.sh -projects "$SDK_ROOT/test/dotnet-aot.Tests/dotnet-aot.Tests.csproj" -c Debug 2>&1 | tee "$GITHUB_WORKSPACE/fix-control-build.log"
+
+      - name: Run MTP host and require fix-control marker
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd "$SDK_ROOT"
+          TEST_DLL="$SDK_ROOT/artifacts/bin/dotnet-aot.Tests/Debug/net11.0/dotnet-aot.Tests.dll"
+          test -f "$TEST_DLL"
+          export FIX_CONTROL_PROOF="$GITHUB_WORKSPACE/exact-path-fix-control-proof.txt"
+          rm -f "$FIX_CONTROL_PROOF"
+
+          set +e
+          ./.dotnet/dotnet "$TEST_DLL" 2>&1 | tee "$GITHUB_WORKSPACE/fix-control-test.log"
+          TEST_RC=${PIPESTATUS[0]}
+          set -e
+          echo "MTP_EXIT_CODE=$TEST_RC"
+
+          test -f "$FIX_CONTROL_PROOF"
+          cat "$FIX_CONTROL_PROOF"
+          grep -q "EXACT_PATH_HASH_FIX_CONTROL=PASS" "$FIX_CONTROL_PROOF"
+          grep -q "ARTIFACTS_DIFFERENT=True" "$FIX_CONTROL_PROOF"
+          grep -q "ATTACKER_CACHE_EXISTS=True" "$FIX_CONTROL_PROOF"
+          grep -q "VICTIM_CACHE_EXISTS=False" "$FIX_CONTROL_PROOF"
+          grep -q "VICTIM_PLAN=ManagedFallback" "$FIX_CONTROL_PROOF"
+          echo "CURRENT_MAIN_CAUSAL_FIX_CONTROL=PASS"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: current-main-sdk-exact-path-fix-control
+          path: |
+            fix-control-main-sha.txt
+            fix-control.patch
+            fix-control-build.log
+            fix-control-test.log
+            exact-path-fix-control-proof.txt
