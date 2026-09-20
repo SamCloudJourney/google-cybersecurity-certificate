@@ -1,0 +1,115 @@
+name: SDK file-app .NET 10 feature-band collision matrix
+
+on:
+  push:
+    branches:
+      - lab/kestrel-chunk-extensions-20260920
+    paths:
+      - '.github/workflows/sdk-fileapp-net10-featureband-matrix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  featureband:
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk:
+          - '10.0.100'
+          - '10.0.200'
+          - '10.0.300'
+          - '10.0.401'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    name: featureband-${{ matrix.sdk }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.sdk }}
+
+      - name: Build-only case collision probe
+        shell: bash
+        run: |
+          set -euxo pipefail
+          dotnet --info
+
+          ROOT="$RUNNER_TEMP/net10-featureband-${{ matrix.sdk }}"
+          A="$ROOT/victim/Program.cs"
+          V="$ROOT/VICTIM/Program.cs"
+          MARKER="$RUNNER_TEMP/NET10_FEATUREBAND_${{ matrix.sdk }}.marker"
+          rm -rf "$ROOT"; rm -f "$MARKER"
+          mkdir -p "$(dirname "$A")" "$(dirname "$V")"
+
+          cat > "$A" <<EOF
+          using System.IO;
+          File.WriteAllText(@"$MARKER","ATTACKER");
+          Console.WriteLine("FEATUREBAND_ATTACKER_EXECUTED");
+          EOF
+
+          cat > "$V" <<'EOF'
+          Console.WriteLine("FEATUREBAND_TRUSTED_VICTIM_EXECUTED");
+          EOF
+
+          # Both files exist before cache creation. No timestamp manipulation.
+          python3 - "$A" "$V" <<'PY'
+          import hashlib,sys
+          a=hashlib.sha256(sys.argv[1].upper().encode()).hexdigest()
+          b=hashlib.sha256(sys.argv[2].upper().encode()).hexdigest()
+          print("HASH_A="+a)
+          print("HASH_V="+b)
+          print("HASHES_EQUAL="+str(a==b))
+          PY
+
+          set +e
+          dotnet build "$A" > "$ROOT/build.out" 2> "$ROOT/build.err"
+          BUILD_RC=$?
+          set -e
+          cat "$ROOT/build.out"; cat "$ROOT/build.err"
+          echo "BUILD_RC=$BUILD_RC"
+
+          if [ "$BUILD_RC" -ne 0 ]; then
+            echo "FEATUREBAND_RESULT=FILE_BASED_BUILD_UNAVAILABLE_OR_FAILED"
+            exit 0
+          fi
+
+          test ! -f "$MARKER"
+          echo "FEATUREBAND_BUILD_ONLY_PRECONDITION=PASS"
+
+          set +e
+          dotnet run --file "$V" > "$ROOT/victim.out" 2> "$ROOT/victim.err"
+          RUN_RC=$?
+          set -e
+          cat "$ROOT/victim.out"; cat "$ROOT/victim.err"
+          echo "RUN_RC=$RUN_RC"
+
+          if [ "$RUN_RC" -ne 0 ]; then
+            echo "FEATUREBAND_RESULT=FILE_BASED_RUN_UNAVAILABLE_OR_FAILED"
+            exit 0
+          fi
+
+          if grep -q 'FEATUREBAND_ATTACKER_EXECUTED' "$ROOT/victim.out" && test -f "$MARKER"; then
+            echo "FEATUREBAND_RESULT=AFFECTED"
+          elif grep -q 'FEATUREBAND_TRUSTED_VICTIM_EXECUTED' "$ROOT/victim.out"; then
+            echo "FEATUREBAND_RESULT=NOT_AFFECTED"
+          else
+            echo "FEATUREBAND_RESULT=UNKNOWN"
+          fi
+
+          cp "$ROOT/build.out" "$GITHUB_WORKSPACE/build-${{ matrix.sdk }}.out"
+          cp "$ROOT/build.err" "$GITHUB_WORKSPACE/build-${{ matrix.sdk }}.err"
+          cp "$ROOT/victim.out" "$GITHUB_WORKSPACE/victim-${{ matrix.sdk }}.out"
+          cp "$ROOT/victim.err" "$GITHUB_WORKSPACE/victim-${{ matrix.sdk }}.err"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: net10-featureband-${{ matrix.sdk }}
+          path: |
+            build-*.out
+            build-*.err
+            victim-*.out
+            victim-*.err
