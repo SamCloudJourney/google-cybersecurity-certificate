@@ -1,0 +1,84 @@
+name: Identity recipient regression (isolated lab)
+on:
+  push:
+    branches: [lab/dotnet-identity-mail-routing-20261115]
+    paths:
+      - 'research/identity-mail-regression/**'
+      - '.github/workflows/identity-mail-regression-20261115.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Compare ${{ matrix.framework }} on released packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - framework: net10.0
+            package: 10.0.15
+            sdk: 10.0.404
+          - framework: net11.0
+            package: 11.0.0
+            sdk: 11.0.100
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ matrix.sdk }}
+      - name: Restore and build pinned release
+        run: |
+          dotnet --info
+          dotnet restore research/identity-mail-regression/CanonicalMailProbe.csproj -p:PROBE_TFM=${{ matrix.framework }} -p:PROBE_VERSION=${{ matrix.package }}
+          dotnet build research/identity-mail-regression/CanonicalMailProbe.csproj --no-restore -c Release -p:PROBE_TFM=${{ matrix.framework }} -p:PROBE_VERSION=${{ matrix.package }}
+      - name: Probe only synthetic accounts with local recording email sender
+        shell: bash
+        env:
+          ASPNETCORE_URLS: http://127.0.0.1:5067
+        run: |
+          set -euo pipefail
+          dotnet research/identity-mail-regression/bin/Release/${{ matrix.framework }}/CanonicalMailProbe.dll > /tmp/identity-mail-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true; tail -n 60 /tmp/identity-mail-server.log' EXIT
+          for attempt in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:5067/_lab/email-result >/dev/null; then break; fi
+            sleep 1
+          done
+          python3 - <<'PY'
+          import json, urllib.request
+          base="http://127.0.0.1:5067"
+          def call(path, data=None):
+              payload=None if data is None else json.dumps(data).encode("utf-8")
+              req=urllib.request.Request(base+path,data=payload,headers={"Content-Type":"application/json"})
+              with urllib.request.urlopen(req, timeout=10) as response:
+                  body=response.read().decode()
+                  return response.status, json.loads(body) if body else {}
+          status, seeded=call("/_lab/seed", {})
+          assert status==200 and seeded["success"], ("seed failed", seeded)
+          cases=[
+              ("baseline ASCII casefold", "victim.case@lab.example"),
+              ("Unicode dotless i confusable", "V\u0131ctim.Case@lab.example"),
+              ("unrelated address negative control", "outsider@lab.example"),
+          ]
+          for name, requested in cases:
+              _, previous=call("/_lab/email-result")
+              status, _ = call("/identity/forgotPassword",{"email":requested})
+              assert status==200, (name,status)
+              _, observed=call("/_lab/email-result")
+              sent_to=observed.get("recipient")
+              matched = sent_to==requested
+              if name == "baseline ASCII casefold":
+                  assert matched, (name, "expected normalized account lookup to work", observed)
+              elif name == "unrelated address negative control":
+                  assert observed==previous, (name, "unexpected send for nonaccount", observed)
+              print(json.dumps({
+                  "test":name,"looked_up_account":matched,
+                  "requested":requested,"sent_to":sent_to,
+                  "account_email":observed["expected"],
+                  "recipient_matches_account": sent_to==observed["expected"]
+              },ensure_ascii=True),flush=True)
+          PY
