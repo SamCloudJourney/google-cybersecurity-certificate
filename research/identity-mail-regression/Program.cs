@@ -35,6 +35,16 @@ app.MapPost("/_lab/seed", async (UserManager<IdentityUser> manager) =>
 app.MapGet("/_lab/email-result", (RecordingEmailSender sender) =>
     Results.Json(new { sender.Kind, sender.Recipient, expected = storedEmail }));
 
+app.MapPost("/_lab/reset-emails", (RecordingEmailSender sender) => { sender.Clear(); return Results.Ok(); });
+
+app.MapGet("/_lab/normalize", (ILookupNormalizer normalizer) => Results.Json(new
+{
+    stored = normalizer.NormalizeEmail(storedEmail),
+    ascii = normalizer.NormalizeEmail("victim.case@lab.example"),
+    dotless = normalizer.NormalizeEmail("V\u0131ctim.Case@lab.example"),
+    unrelated = normalizer.NormalizeEmail("outsider@lab.example")
+}));
+
 app.Run();
 
 sealed class ProbeDb(DbContextOptions<ProbeDb> options) : IdentityDbContext<IdentityUser>(options) { }
@@ -43,6 +53,7 @@ sealed class RecordingEmailSender : IEmailSender<IdentityUser>
 {
     public string? Kind { get; private set; }
     public string? Recipient { get; private set; }
+    public void Clear() { Kind = null; Recipient = null; }
 
     public Task SendConfirmationLinkAsync(IdentityUser user, string email, string confirmationLink)
     {
