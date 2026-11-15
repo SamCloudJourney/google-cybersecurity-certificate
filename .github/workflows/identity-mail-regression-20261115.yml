@@ -59,26 +59,31 @@ jobs:
                   return response.status, json.loads(body) if body else {}
           status, seeded=call("/_lab/seed", {})
           assert status==200 and seeded["success"], ("seed failed", seeded)
+          _, norms=call("/_lab/normalize")
+          print("NORMALIZED_KEYS",json.dumps(norms,ensure_ascii=True),flush=True)
           cases=[
-              ("baseline ASCII casefold", "victim.case@lab.example"),
-              ("Unicode dotless i confusable", "V\u0131ctim.Case@lab.example"),
-              ("unrelated address negative control", "outsider@lab.example"),
+              ("ascii casefold", "victim.case@lab.example", "ascii"),
+              ("dotless-i unicode", "V\u0131ctim.Case@lab.example", "dotless"),
+              ("unrelated negative", "outsider@lab.example", "unrelated"),
           ]
-          for name, requested in cases:
-              _, previous=call("/_lab/email-result")
-              status, _ = call("/identity/forgotPassword",{"email":requested})
-              assert status==200, (name,status)
-              _, observed=call("/_lab/email-result")
-              sent_to=observed.get("recipient")
-              matched = sent_to==requested
-              if name == "baseline ASCII casefold":
-                  assert matched, (name, "expected normalized account lookup to work", observed)
-              elif name == "unrelated address negative control":
-                  assert observed==previous, (name, "unexpected send for nonaccount", observed)
-              print(json.dumps({
-                  "test":name,"looked_up_account":matched,
-                  "requested":requested,"sent_to":sent_to,
-                  "account_email":observed["expected"],
-                  "recipient_matches_account": sent_to==observed["expected"]
-              },ensure_ascii=True),flush=True)
+          for endpoint in ("/identity/forgotPassword","/identity/resendConfirmationEmail"):
+              for name, requested, normalizer_key in cases:
+                  _, _ = call("/_lab/reset-emails", {})
+                  should_resolve = norms[normalizer_key] == norms["stored"]
+                  status, _ = call(endpoint,{"email":requested})
+                  assert status == 200, (endpoint,name,status)
+                  _, observed = call("/_lab/email-result")
+                  recipient = observed.get("recipient")
+                  expected = observed.get("expected")
+                  print(json.dumps({
+                      "endpoint":endpoint,"case":name,
+                      "requested":requested,"normalized_key_collision":should_resolve,
+                      "actual_recipient":recipient,"stored_recipient":expected,
+                      "recipient_is_stored":recipient==expected,
+                  },ensure_ascii=True),flush=True)
+                  if should_resolve:
+                      assert recipient==expected, (endpoint,name,"recipient not canonical",observed)
+                  else:
+                      assert recipient is None, (endpoint,name,"unexpected delivery",observed)
+          print("RESULT: all canonical-recipient and negative-control assertions passed",flush=True)
           PY
