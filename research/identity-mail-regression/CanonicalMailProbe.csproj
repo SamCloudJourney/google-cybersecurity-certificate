@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>$(PROBE_TFM)</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="$(PROBE_VERSION)" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="$(PROBE_VERSION)" />
+  </ItemGroup>
+</Project>
